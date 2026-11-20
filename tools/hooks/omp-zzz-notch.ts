@@ -129,8 +129,10 @@ export default function (pi: HookAPI): void {
 	const send = (extra: string[] = []) =>
 		shared.cwd
 			? zzz([
-					"notify", path.basename(shared.cwd), shared.body,
-					"--source", shared.title ?? "omp", "--status", shared.status, "--symbol", "sparkles",
+					// The session's own title says what it is about; the
+					// project moves to the small label next to it.
+					"notify", shared.title ?? path.basename(shared.cwd), shared.body,
+					"--source", shared.title ? path.basename(shared.cwd) : "omp", "--status", shared.status, "--symbol", "sparkles",
 					"--app", process.env.__CFBundleIdentifier ?? "",
 					"--id", id, "--agents", String(shared.agents),
 					...extra,
