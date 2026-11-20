@@ -137,7 +137,11 @@ struct ContentView: View {
     /// lever anyway.
     private var openNotchHeight: CGFloat? {
         if notificationManager.activeNotification != nil { return 132 }
-        return Defaults[.compactMode] ? nil : vm.notchSize.height
+        if Defaults[.compactMode] { return nil }
+        // The Dev tab holds a session card, not a tile row: give it room
+        // (other notch session apps open 320–580pt tall for the same job).
+        if coordinator.currentView == .dev && !devActivity.items.isEmpty { return devTabNotchHeight }
+        return vm.notchSize.height
     }
 
     /// Compact mode drops the tab bar along with the tabs it switches

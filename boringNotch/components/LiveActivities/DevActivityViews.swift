@@ -415,7 +415,8 @@ private struct DevSessionCard: View {
 
     @ViewBuilder
     private var resultSection: some View {
-        if let body = item.body {
+        // "Idle"/"Working" are placeholders, not results.
+        if let body = item.body, !["Idle", "Working", "Done"].contains(body) {
             DevCardSection("LAST RESULT") {
                 Text(body)
                     .font(.system(size: 12))
