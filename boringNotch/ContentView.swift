@@ -197,8 +197,10 @@ struct ContentView: View {
             // notification is still in the stack leaves the chin at the
             // notification's width.
             switch activity {
-            case .notification, .dev:
+            case .notification:
                 chinWidth += (2 * max(0, vm.effectiveClosedNotchHeight - 12) + 20)
+            case .dev:
+                chinWidth += 2 * DevActivityLiveActivity.sideWidth(count: devActivity.items.count, notchHeight: vm.effectiveClosedNotchHeight) + 4
             case .music:
                 chinWidth += (2 * max(0, displayClosedNotchHeight - 12) + 20 + 2 * liveActivityEdgeMargin + 2)
                 // The inline song-change peek widens the pill itself, so the

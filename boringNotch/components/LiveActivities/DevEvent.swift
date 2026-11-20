@@ -5,19 +5,21 @@
 //  Events pushed by local dev tooling (agent hooks, build scripts) through
 //  `zzznotch://` URLs.
 //
-//  - `run` and `wait` are ongoing states: they live in `DevActivityStore`,
-//    shown as a count in the closed notch and as a list in the Dev tab, until
-//    an event with the same id replaces them, `clear` removes them, or they
-//    expire. `wait` also pops up once, since it needs the user.
+//  - `run`, `wait` and `idle` are ongoing states: they live in
+//    `DevActivityStore`, one pixel mascot per id in the closed notch and a
+//    row in the Dev tab, until `clear` removes them or they expire. Another
+//    status for the same id changes the mascot's mood. `wait` also pops up
+//    once, since it needs the user.
 //  - `ok`, `fail` and `info` are one-off results: they pop up through the
-//    notification queue and end the ongoing state with the same id.
+//    notification queue. `ok`/`fail` on a live id let its mascot react for a
+//    few seconds, then it leaves unless an ongoing status follows.
 //
 
 import AppKit
 import SwiftUI
 
 enum DevEventStatus: String {
-    case info, ok, fail, wait, run
+    case info, ok, fail, wait, run, idle
 
     var color: Color {
         switch self {
@@ -26,14 +28,15 @@ enum DevEventStatus: String {
         case .fail: .red
         case .wait: .yellow
         case .run: .cyan
+        case .idle: .gray
         }
     }
 
-    var isOngoing: Bool { self == .run || self == .wait }
+    var isOngoing: Bool { self == .run || self == .wait || self == .idle }
 }
 
 /// `zzznotch://notify?title=…&body=…` with optional
-/// `source` (header label), `status` (info|ok|fail|wait|run), `symbol` (SF Symbol),
+/// `source` (header label), `status` (info|ok|fail|wait|run|idle), `symbol` (SF Symbol),
 /// `app` (bundle ID for the icon), `url` (opened on click),
 /// `id` (an event reusing a live id replaces it), `duration` (seconds; popup
 /// time for one-off events, lifetime for ongoing ones).
@@ -87,15 +90,19 @@ enum DevEventURL {
 final class DevActivityStore: ObservableObject {
     static let shared = DevActivityStore()
 
-    /// Ongoing (`run`/`wait`) events, waiting ones first, then newest first.
+    /// Ongoing events, in the order their ids first appeared, so each
+    /// session's mascot keeps its spot in the notch.
     @Published private(set) var items: [SystemNotification] = []
+    /// Ids that just finished with `ok`, mapped to when their celebration ends.
+    @Published private(set) var celebratingUntil: [String: Date] = [:]
 
     /// An ongoing state nobody updates (crashed tool, killed terminal) must
     /// not haunt the notch forever.
     private let defaultLifetime: TimeInterval = 3600
+    /// How long an `ok`/`fail` keeps its mascot on screen when no ongoing
+    /// status follows.
+    private let resultLinger: TimeInterval = 4
     private var expiry: [String: Task<Void, Never>] = [:]
-
-    var waitingCount: Int { items.count(where: { $0.status == .wait }) }
 
     func handle(_ url: URL) {
         if let id = DevEventURL.clearedID(from: url) {
@@ -108,7 +115,14 @@ final class DevActivityStore: ObservableObject {
 
     func post(_ event: SystemNotification) {
         guard event.status?.isOngoing == true else {
-            remove(event.id)
+            // A result ends the ongoing state; if one existed, its mascot
+            // stays a moment to react before leaving.
+            if items.contains(where: { $0.id == event.id }) {
+                if event.status == .ok { celebratingUntil[event.id] = Date().addingTimeInterval(resultLinger) }
+                var result = event
+                result.displayDuration = resultLinger
+                upsert(result)
+            }
             SystemNotificationManager.shared.post(event)
             return
         }
@@ -118,7 +132,7 @@ final class DevActivityStore: ObservableObject {
             var popup = event
             popup.displayDuration = nil
             SystemNotificationManager.shared.post(popup)
-        } else {
+        } else if event.status == .run {
             // Work resumed: the "waiting" popup for this id is stale.
             SystemNotificationManager.shared.dismissActive(token: event.id)
         }
@@ -126,15 +140,26 @@ final class DevActivityStore: ObservableObject {
 
     func remove(_ id: String) {
         expiry.removeValue(forKey: id)?.cancel()
+        celebratingUntil[id] = nil
         items.removeAll { $0.id == id }
     }
 
+    func mood(of item: SystemNotification, at now: Date) -> MascotMood {
+        if let until = celebratingUntil[item.id], until > now { return .done }
+        switch item.status {
+        case .run: return .working
+        case .wait: return .waiting
+        case .ok: return .done
+        case .idle where now.timeIntervalSince(item.receivedAt) > 180: return .sleep
+        default: return .idle
+        }
+    }
+
     private func upsert(_ event: SystemNotification) {
-        items.removeAll { $0.id == event.id }
-        items.append(event)
-        items.sort { lhs, rhs in
-            if (lhs.status == .wait) != (rhs.status == .wait) { return lhs.status == .wait }
-            return lhs.receivedAt > rhs.receivedAt
+        if let index = items.firstIndex(where: { $0.id == event.id }) {
+            items[index] = event
+        } else {
+            items.append(event)
         }
 
         expiry[event.id]?.cancel()

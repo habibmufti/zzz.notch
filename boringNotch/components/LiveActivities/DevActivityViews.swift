@@ -5,64 +5,61 @@
 
 import SwiftUI
 
-/// Closed-notch pill for ongoing dev events: the notch becomes a face, one
-/// eye on each side of the camera. Working: the eyes scan side to side and
-/// blink. Waiting for you: they look up, widen and turn yellow. With more
-/// than one ongoing event, the count sits beside the right eye.
+/// Closed-notch pill for ongoing dev events: one pixel mascot per id,
+/// alternating left and right of the camera, two per side at most.
 struct DevActivityLiveActivity: View {
     @EnvironmentObject private var vm: BoringViewModel
     @ObservedObject private var store = DevActivityStore.shared
 
-    private var itemSize: CGFloat { max(0, vm.effectiveClosedNotchHeight - 12) }
+    static let perSide = 2
+    static let spacing: CGFloat = 2
+
+    /// Integer multiple of the 16 px sprite so pixels stay square.
+    static func mascotSize(notchHeight: CGFloat) -> CGFloat {
+        max(16, (notchHeight / 16).rounded(.down) * 16)
+    }
+
+    /// Width the pill adds on each side of the notch for `count` mascots.
+    static func sideWidth(count: Int, notchHeight: CGFloat) -> CGFloat {
+        let n = CGFloat(min((count + 1) / 2, perSide))
+        return n * mascotSize(notchHeight: notchHeight) + max(0, n - 1) * spacing + 6
+    }
 
     var body: some View {
-        let waiting = store.waitingCount > 0
-        TimelineView(.animation) { timeline in
-            let t = timeline.date.timeIntervalSinceReferenceDate
-            HStack {
-                AgentEye(size: itemSize, waiting: waiting, time: t)
+        let size = Self.mascotSize(notchHeight: vm.effectiveClosedNotchHeight)
+        let sideWidth = Self.sideWidth(count: store.items.count, notchHeight: vm.effectiveClosedNotchHeight)
+        let shown = Array(store.items.prefix(Self.perSide * 2))
+        let left = shown.enumerated().filter { $0.offset % 2 == 0 }.map(\.element)
+        let right = shown.enumerated().filter { $0.offset % 2 == 1 }.map(\.element)
+        let hidden = store.items.count - shown.count
 
-                Rectangle()
-                    .fill(.black)
-                    .frame(width: vm.closedNotchSize.width - cornerRadiusInsets.closed.top)
+        HStack(spacing: 0) {
+            side(left, size: size).frame(width: sideWidth, alignment: .trailing)
 
-                AgentEye(size: itemSize, waiting: waiting, time: t)
-                    .overlay(alignment: .bottomTrailing) {
-                        if store.items.count > 1 {
-                            Text("\(store.items.count)")
-                                .font(.system(size: itemSize * 0.38, weight: .bold, design: .rounded))
-                                .monospacedDigit()
-                                .foregroundStyle(.white.opacity(0.7))
-                                .offset(x: itemSize * 0.15, y: itemSize * 0.1)
-                        }
+            Rectangle()
+                .fill(.black)
+                .frame(width: vm.closedNotchSize.width - cornerRadiusInsets.closed.top)
+
+            side(right, size: size)
+                .overlay(alignment: .bottomTrailing) {
+                    if hidden > 0 {
+                        Text("+\(hidden)")
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.7))
                     }
-            }
+                }
+                .frame(width: sideWidth, alignment: .leading)
         }
         .frame(height: vm.effectiveClosedNotchHeight)
-        .animation(.spring(duration: 0.4), value: waiting)
     }
-}
 
-private struct AgentEye: View {
-    let size: CGFloat
-    let waiting: Bool
-    let time: TimeInterval
-
-    private static let lavender = Color(red: 0.80, green: 0.78, blue: 0.98)
-
-    var body: some View {
-        // Blink for ~0.14s every 3.7s; waiting eyes breathe instead of scanning.
-        let blinking = time.truncatingRemainder(dividingBy: 3.7) < 0.14
-        let width = size * 0.34
-        let height = size * (waiting ? 0.9 + 0.06 * sin(time * 3) : 0.72) * (blinking ? 0.15 : 1)
-        let dx = waiting ? 0 : sin(time * 1.4) * size * 0.16
-        let dy = waiting ? -size * 0.06 : 0
-
-        Capsule()
-            .fill(waiting ? DevEventStatus.wait.color : Self.lavender)
-            .frame(width: width, height: height)
-            .offset(x: dx, y: dy)
-            .frame(width: size, height: size)
+    private func side(_ items: [SystemNotification], size: CGFloat) -> some View {
+        HStack(spacing: Self.spacing) {
+            ForEach(items) { item in
+                MascotView(look: MascotLook(id: item.id)) { store.mood(of: item, at: Date()) }
+                    .frame(width: size, height: size)
+            }
+        }
     }
 }
 
@@ -89,15 +86,8 @@ private struct DevActivityRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Group {
-                if item.status == .run {
-                    ProgressView().controlSize(.small).tint(DevEventStatus.run.color)
-                } else {
-                    Image(systemName: "hand.raised.fill")
-                        .foregroundStyle(DevEventStatus.wait.color)
-                }
-            }
-            .frame(width: 18)
+            MascotView(look: MascotLook(id: item.id)) { store.mood(of: item, at: Date()) }
+                .frame(width: 32, height: 32)
 
             Button {
                 Task { _ = await SystemNotificationManager.shared.open(item) }

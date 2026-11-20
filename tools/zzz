@@ -1,18 +1,19 @@
 #!/bin/bash
 # zzz — push an event to the zzz.notch notch.
 #
-#   zzz notify "title" ["body"] [--status info|ok|fail|wait|run] [--source NAME]
+#   zzz notify "title" ["body"] [--status info|ok|fail|wait|run|idle] [--source NAME]
 #              [--symbol SF_SYMBOL] [--app BUNDLE_ID] [--url URL] [--id KEY]
 #              [--duration SECONDS]
 #   zzz clear --id KEY
 #
-# run/wait are ongoing states listed in the notch until the same --id gets
-# another status, `zzz clear`, or they expire. info/ok/fail pop up briefly.
+# run/wait/idle are ongoing states: one pixel mascot per --id in the notch
+# until `zzz clear` or expiry. info/ok/fail pop up briefly; ok/fail on a live
+# --id make its mascot react, then leave unless an ongoing status follows.
 # Exits 0 even if the app is not running, so hooks never break their caller.
 # Works with macOS /bin/bash 3.2.
 set -eu
 
-usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
 
 urlencode() {
   local LC_ALL=C
