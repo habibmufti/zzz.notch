@@ -14,6 +14,11 @@ struct SystemNotification: Identifiable, Equatable {
     let subtitle: String?
     let body: String?
     let receivedAt: Date
+    /// Set only for dev events (`zzznotch://notify`).
+    var symbol: String? = nil
+    var status: DevEventStatus? = nil
+    var actionURL: URL? = nil
+    var displayDuration: TimeInterval? = nil
 }
 
 @MainActor
@@ -98,6 +103,9 @@ final class SystemNotificationManager: ObservableObject {
 
     func open(_ notification: SystemNotification) async -> Bool {
         let workspace = NSWorkspace.shared
+        if let actionURL = notification.actionURL {
+            return workspace.open(actionURL)
+        }
 
         for bundleID in candidateBundleIDs(for: notification) {
             let running = workspace.runningApplications.first { application in
@@ -152,6 +160,29 @@ final class SystemNotificationManager: ObservableObject {
             receivedAt: Date()
         )
         guard isAllowed(notification) else { return }
+        enqueue(notification)
+    }
+
+    /// Shows an event pushed by local dev tooling. Skips the mirrored-app
+    /// filter; an event reusing a live id replaces that one in place, so a
+    /// tool can update a status ("running" → "done") without stacking.
+    func post(_ notification: SystemNotification) {
+        if activeNotification?.id == notification.id {
+            if isUserPresent {
+                activeNotification = notification
+            } else {
+                show(notification)
+            }
+            return
+        }
+        if let index = queuedNotifications.firstIndex(where: { $0.id == notification.id }) {
+            queuedNotifications[index] = notification
+            return
+        }
+        enqueue(notification)
+    }
+
+    private func enqueue(_ notification: SystemNotification) {
         guard activeNotification == nil else {
             guard isUserPresent else {
                 show(notification)
@@ -170,12 +201,12 @@ final class SystemNotificationManager: ObservableObject {
     private func show(_ notification: SystemNotification) {
         dismissTask?.cancel()
         activeNotification = notification
-        scheduleDismiss(for: notification.id)
+        scheduleDismiss(for: notification.id, after: notification.displayDuration ?? displayDuration)
     }
 
-    private func scheduleDismiss(for token: String) {
+    private func scheduleDismiss(for token: String, after delay: TimeInterval) {
         dismissTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(self?.displayDuration ?? 8))
+            try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
             await self?.dismissActive(token: token)
         }

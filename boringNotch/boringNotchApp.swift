@@ -160,6 +160,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    /// `zzznotch://notify?…` from `zzz notify` and dev-tool hooks.
+    @MainActor
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard let event = DevEventURL.notification(from: url) else { continue }
+            SystemNotificationManager.shared.post(event)
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         if LegacyAppBundleMigration.isRelaunching { return }
 

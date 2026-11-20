@@ -6,11 +6,16 @@
 import SwiftUI
 
 private struct NotificationSourceIcon: View {
-    let bundleID: String?
+    let notification: SystemNotification
     let size: CGFloat
 
     var body: some View {
-        if let bundleID {
+        if let symbol = notification.symbol {
+            Image(systemName: symbol)
+                .font(.system(size: size * 0.55, weight: .semibold))
+                .foregroundStyle(notification.status?.color ?? .white)
+                .frame(width: size, height: size)
+        } else if let bundleID = notification.bundleID {
             appIcon(for: bundleID)
                 .resizable().scaledToFit()
                 .frame(width: size, height: size)
@@ -36,7 +41,7 @@ struct NotificationLiveActivity: View {
 
     var body: some View {
         HStack {
-            NotificationSourceIcon(bundleID: notification.bundleID, size: itemSize)
+            NotificationSourceIcon(notification: notification, size: itemSize)
 
             Rectangle()
                 .fill(.black)
@@ -44,11 +49,11 @@ struct NotificationLiveActivity: View {
 
             ZStack {
                 Circle()
-                    .stroke(Color.effectiveAccent, lineWidth: 1.5)
+                    .stroke(dotColor, lineWidth: 1.5)
                     .scaleEffect(ringScale)
                     .opacity(ringOpacity)
                 Circle()
-                    .fill(Color.effectiveAccent)
+                    .fill(dotColor)
                     .frame(width: 7, height: 7)
             }
             .frame(width: itemSize, height: itemSize)
@@ -56,6 +61,10 @@ struct NotificationLiveActivity: View {
         .frame(height: vm.effectiveClosedNotchHeight)
         .onAppear { pulse() }
         .onChange(of: notification.id) { _, _ in pulse() }
+    }
+
+    private var dotColor: Color {
+        notification.status?.color ?? Color.effectiveAccent
     }
 
     private func pulse() {
@@ -76,7 +85,7 @@ struct NotificationExpandedView: View {
         ZStack(alignment: .topTrailing) {
             Button(action: openSourceApp) {
                 HStack(alignment: .center, spacing: 12) {
-                    NotificationSourceIcon(bundleID: notification.bundleID, size: 46)
+                    NotificationSourceIcon(notification: notification, size: 46)
 
                     VStack(alignment: .leading, spacing: 5) {
                         HStack(alignment: .firstTextBaseline, spacing: 6) {

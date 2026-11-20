@@ -1,0 +1,65 @@
+#!/bin/bash
+# zzz — push an event to the zzz.notch notch.
+#
+#   zzz notify "title" ["body"] [--status ok|fail|wait|info] [--source NAME]
+#              [--symbol SF_SYMBOL] [--app BUNDLE_ID] [--url URL] [--id KEY]
+#              [--duration SECONDS]
+#
+# Events reusing --id replace the one on screen. Exits 0 even if the app is
+# not running, so hooks never break the tool that calls them.
+# Works with macOS /bin/bash 3.2.
+set -eu
+
+usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; }
+
+urlencode() {
+  local LC_ALL=C
+  local s=$1 out= c i
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    case $c in
+      [a-zA-Z0-9.~_-]) out=$out$c ;;
+      *) printf -v c '%d' "'$c"; printf -v c '%%%02X' $((c & 255)); out=$out$c ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+case ${1:-} in
+  notify) shift ;;
+  -h|--help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+title= body= status= source= symbol= app= url= id= duration= npos=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --status|--source|--symbol|--app|--url|--id|--duration)
+      [ $# -ge 2 ] || { echo "zzz: $1 needs a value" >&2; exit 2; }
+      eval "${1#--}=\$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) echo "zzz: unknown option $1" >&2; exit 2 ;;
+    *)
+      case $npos in
+        0) title=$1 ;;
+        1) body=$1 ;;
+        *) echo "zzz: too many arguments" >&2; exit 2 ;;
+      esac
+      npos=$((npos + 1)); shift ;;
+  esac
+done
+
+[ -n "$title$body" ] || { echo "zzz: title or body required" >&2; exit 2; }
+
+query=
+for key in title body status source symbol app url id duration; do
+  eval "value=\$$key"
+  [ -n "$value" ] || continue
+  query="$query${query:+&}$key=$(urlencode "$value")"
+done
+
+if [ -n "${ZZZ_DRY_RUN:-}" ]; then
+  printf 'zzznotch://notify?%s\n' "$query"
+  exit 0
+fi
+open -g "zzznotch://notify?$query" 2>/dev/null || true

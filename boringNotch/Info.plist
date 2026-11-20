@@ -4,6 +4,17 @@
 <dict>
 	<key>CFBundleAllowMixedLocalizations</key>
 	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.habibmufti.zzznotch.events</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>zzznotch</string>
+			</array>
+		</dict>
+	</array>
 	<key>SUBundleName</key>
 	<string>Boring Notch</string>
 	<key>SUEnableAutomaticChecks</key>
