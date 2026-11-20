@@ -56,11 +56,21 @@ struct DevActivityLiveActivity: View {
     private func side(_ items: [SystemNotification], size: CGFloat) -> some View {
         HStack(spacing: Self.spacing) {
             ForEach(items) { item in
-                MascotView(look: MascotLook(id: item.id)) { store.mood(of: item, at: Date()) }
-                    .frame(width: size, height: size)
+                MascotView(
+                    look: MascotLook(id: item.id),
+                    mood: { store.mood(of: item, at: Date()) },
+                    activity: { mascotActivity(of: item) },
+                    badge: { item.agents ?? 0 }
+                )
+                .frame(width: size, height: size)
             }
         }
     }
+}
+
+/// Pose for a row's `activity` param; unknown or missing values type.
+private func mascotActivity(of item: SystemNotification) -> MascotActivity {
+    MascotActivity(rawValue: item.activity ?? "") ?? .type
 }
 
 /// Open-notch Dev tab: every ongoing event; click opens its source.
@@ -68,13 +78,15 @@ struct DevActivityListView: View {
     @ObservedObject private var store = DevActivityStore.shared
 
     var body: some View {
+        let items = store.sortedItems
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 6) {
-                ForEach(store.items) { item in
+                ForEach(items) { item in
                     DevActivityRow(item: item)
                 }
             }
             .padding(.horizontal, 6)
+            .animation(.spring(response: 0.4, dampingFraction: 0.85), value: items.map(\.id))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
@@ -82,64 +94,105 @@ struct DevActivityListView: View {
 
 private struct DevActivityRow: View {
     @ObservedObject private var store = DevActivityStore.shared
+    @ObservedObject private var askCenter = DevAskCenter.shared
     let item: SystemNotification
+    @State private var hovering = false
 
     var body: some View {
-        HStack(spacing: 10) {
-            MascotView(look: MascotLook(id: item.id)) { store.mood(of: item, at: Date()) }
+        VStack(spacing: 6) {
+            HStack(spacing: 10) {
+                MascotView(
+                    look: MascotLook(id: item.id),
+                    mood: { store.mood(of: item, at: Date()) },
+                    activity: { mascotActivity(of: item) },
+                    badge: { item.agents ?? 0 }
+                )
                 .frame(width: 32, height: 32)
 
-            Button {
-                Task { _ = await SystemNotificationManager.shared.open(item) }
-            } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(item.title ?? item.appName ?? "zzz")
-                            .font(.system(size: 13, weight: .semibold))
-                            .lineLimit(1)
-                        if let source = item.appName, source != item.title {
-                            Text(source)
+                Button {
+                    Task { _ = await SystemNotificationManager.shared.open(item) }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(item.title ?? item.appName ?? "zzz")
+                                .font(.system(size: 13, weight: .semibold))
+                                .lineLimit(1)
+                            if let source = item.appName, source != item.title {
+                                Text(source)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            if let agents = item.agents, agents > 0 {
+                                Text("\(agents) agents")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1)
+                                    .background(.white.opacity(0.1), in: Capsule())
+                            }
+                            Spacer(minLength: 4)
+                            Text(item.receivedAt, style: .relative)
                                 .font(.system(size: 11))
                                 .foregroundStyle(.tertiary)
+                                .fixedSize()
                         }
-                        Spacer(minLength: 4)
-                        Text(item.receivedAt, style: .relative)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .fixedSize()
+                        if let line = item.prompt ?? item.body {
+                            Text(line)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        if let detail = item.subtitle {
+                            Text(detail)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        if hovering, let lines = store.recent[item.id], !lines.isEmpty {
+                            VStack(alignment: .leading, spacing: 1) {
+                                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                                    HStack(spacing: 5) {
+                                        Circle()
+                                            .fill(.tertiary)
+                                            .frame(width: 3, height: 3)
+                                        Text(line)
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundStyle(.tertiary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                }
+                            }
+                            .transition(.opacity)
+                        }
                     }
-                    if let body = item.body {
-                        Text(body)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    if let detail = item.subtitle {
-                        Text(detail)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
+                    .animation(.easeOut(duration: 0.15), value: hovering)
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+                .buttonStyle(.plain)
 
-            Button {
-                store.remove(item.id)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 18, height: 18)
-                    .background(.white.opacity(0.1), in: Circle())
+                Button {
+                    store.remove(item.id)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18, height: 18)
+                        .background(.white.opacity(0.1), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss")
+
+            if let ask = askCenter.pending[item.id] {
+                DevAskView(ask: ask)
+                    .padding(.leading, 42)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+        .onHover { hovering = $0 }
     }
 }

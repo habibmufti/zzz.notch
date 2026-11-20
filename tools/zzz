@@ -4,7 +4,11 @@
 #   zzz notify "title" ["body"] [--status info|ok|fail|wait|run|idle] [--source NAME]
 #              [--symbol SF_SYMBOL] [--app BUNDLE_ID] [--url URL] [--id KEY]
 #              [--duration SECONDS] [--detail "current step"]
+#              [--activity type|search|build|push|read] [--agents N] [--prompt "text"]
 #   zzz clear --id KEY
+#   zzz ask "question" --id KEY --option A [--option B ...] [--multiple] [--timeout S]
+#              waits for an answer in the notch and prints the chosen option(s), one per line.
+#              Exit 1 if nothing was answered in time or the app is not running.
 #
 # run/wait/idle are ongoing states: one pixel mascot per --id in the notch
 # until `zzz clear` or expiry. info/ok/fail pop up briefly; ok/fail on a live
@@ -13,7 +17,7 @@
 # Works with macOS /bin/bash 3.2.
 set -eu
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; }
 
 urlencode() {
   local LC_ALL=C
@@ -28,16 +32,54 @@ urlencode() {
   printf '%s' "$out"
 }
 
+# zzz ask: one question, waits for the answer in the notch (see header).
+ask_cmd() {
+  local question= id= multiple= timeout=120 query= nopt=0 npos=0 url sock raw
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --id|--timeout)
+        [ $# -ge 2 ] || { echo "zzz: $1 needs a value" >&2; exit 2; }
+        if [ "$1" = --id ]; then id=$2; else timeout=$2; fi
+        shift 2 ;;
+      --option)
+        [ $# -ge 2 ] || { echo "zzz: --option needs a value" >&2; exit 2; }
+        query="$query&option=$(urlencode "$2")"; nopt=$((nopt + 1)); shift 2 ;;
+      --multiple) multiple=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      -*) echo "zzz: unknown option $1" >&2; exit 2 ;;
+      *)
+        [ $npos -eq 0 ] || { echo "zzz: too many arguments" >&2; exit 2; }
+        question=$1; npos=1; shift ;;
+    esac
+  done
+  [ -n "$id" ] || { echo "zzz: ask needs --id" >&2; exit 2; }
+  [ -n "$question" ] || { echo "zzz: ask needs a question" >&2; exit 2; }
+  [ "$nopt" -ge 1 ] && [ "$nopt" -le 6 ] || { echo "zzz: ask needs 1-6 --option" >&2; exit 2; }
+  case $timeout in ''|*[!0-9]*) echo "zzz: --timeout must be seconds" >&2; exit 2 ;; esac
+
+  url="zzznotch://ask?id=$(urlencode "$id")&question=$(urlencode "$question")$query&timeout=$timeout${multiple:+&multiple=1}"
+  if [ -n "${ZZZ_DRY_RUN:-}" ]; then printf '%s\n' "$url"; exit 0; fi
+
+  # The app replies with one line: chosen options joined by \x1f, empty on timeout.
+  sock=/tmp/zzznotch-$(id -u).sock
+  [ -S "$sock" ] || exit 1
+  raw=$(printf '%s\n' "$url" | nc -U "$sock" 2>/dev/null) || exit 1
+  [ -n "$raw" ] || exit 1
+  printf '%s\n' "$raw" | tr '\037' '\n'
+  exit 0
+}
+
 case ${1:-} in
   notify|clear) action=$1; shift ;;
+  ask) shift; ask_cmd "$@" ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
 
-title= body= status= source= symbol= app= url= id= duration= detail= npos=0
+title= body= status= source= symbol= app= url= id= duration= detail= activity= agents= prompt= npos=0
 while [ $# -gt 0 ]; do
   case $1 in
-    --status|--source|--symbol|--app|--url|--id|--duration|--detail)
+    --status|--source|--symbol|--app|--url|--id|--duration|--detail|--activity|--agents|--prompt)
       [ $# -ge 2 ] || { echo "zzz: $1 needs a value" >&2; exit 2; }
       eval "${1#--}=\$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -59,7 +101,7 @@ else
 fi
 
 query=
-for key in title body status source symbol app url id duration detail; do
+for key in title body status source symbol app url id duration detail activity agents prompt; do
   eval "value=\$$key"
   [ -n "$value" ] || continue
   query="$query${query:+&}$key=$(urlencode "$value")"

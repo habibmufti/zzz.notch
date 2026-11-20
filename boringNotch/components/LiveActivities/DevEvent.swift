@@ -49,7 +49,10 @@ enum DevEventStatus: String {
 /// `source` (header label), `status` (info|ok|fail|wait|run|idle), `symbol` (SF Symbol),
 /// `app` (bundle ID for the icon), `url` (opened on click),
 /// `id` (an event reusing a live id replaces it), `duration` (seconds; popup
-/// time for one-off events, lifetime for ongoing ones).
+/// time for one-off events, lifetime for ongoing ones),
+/// `activity` (type|search|build|push|read: the mascot's pose),
+/// `agents` (running subagent count, shown as a badge),
+/// `prompt` (the user's request, shown in place of `body` while set).
 /// `zzznotch://clear?id=…` drops the ongoing state with that id.
 enum DevEventURL {
     static let scheme = "zzznotch"
@@ -70,7 +73,10 @@ enum DevEventURL {
             symbol: query["symbol"],
             status: query["status"].flatMap { DevEventStatus(rawValue: $0.lowercased()) } ?? .info,
             actionURL: query["url"].flatMap(URL.init(string:)),
-            displayDuration: query["duration"].flatMap(TimeInterval.init).map { min(max($0, 1), 86_400) }
+            displayDuration: query["duration"].flatMap(TimeInterval.init).map { min(max($0, 1), 86_400) },
+            activity: query["activity"],
+            agents: query["agents"].flatMap(Int.init),
+            prompt: query["prompt"]
         )
     }
 
@@ -100,11 +106,16 @@ enum DevEventURL {
 final class DevActivityStore: ObservableObject {
     static let shared = DevActivityStore()
 
+    /// Whether `ok`/`fail` results and `wait` popups play a system sound.
+    static var soundsEnabled = true
+
     /// Ongoing events, in the order their ids first appeared, so each
     /// session's mascot keeps its spot in the notch.
     @Published private(set) var items: [SystemNotification] = []
     /// Ids that just finished with `ok`, mapped to when their celebration ends.
     @Published private(set) var celebratingUntil: [String: Date] = [:]
+    /// Last few `detail` lines per id, oldest first, shown on row hover.
+    @Published private(set) var recent: [String: [String]] = [:]
 
     /// An ongoing state nobody updates (crashed tool, killed terminal) must
     /// not haunt the notch forever.
@@ -112,6 +123,9 @@ final class DevActivityStore: ObservableObject {
     /// How long an `ok`/`fail` keeps its mascot on screen when no ongoing
     /// status follows.
     private let resultLinger: TimeInterval = 4
+    /// Idle for this long, a mascot falls asleep and sorts last.
+    private let sleepAfter: TimeInterval = 180
+    private let recentLimit = 5
     private var expiry: [String: Task<Void, Never>] = [:]
 
     func handle(_ url: URL) {
@@ -133,14 +147,19 @@ final class DevActivityStore: ObservableObject {
                 result.displayDuration = resultLinger
                 upsert(result)
             }
+            playSound(for: event.status)
             SystemNotificationManager.shared.post(event)
             return
         }
 
         upsert(event)
+        if let detail = event.subtitle, recent[event.id]?.last != detail {
+            recent[event.id] = Array((recent[event.id, default: []] + [detail]).suffix(recentLimit))
+        }
         if event.status == .wait {
             var popup = event
             popup.displayDuration = nil
+            playSound(for: .wait)
             SystemNotificationManager.shared.post(popup)
         } else if event.status == .run {
             // Work resumed: the "waiting" popup for this id is stale.
@@ -151,20 +170,60 @@ final class DevActivityStore: ObservableObject {
     func remove(_ id: String) {
         expiry.removeValue(forKey: id)?.cancel()
         celebratingUntil[id] = nil
+        recent[id] = nil
         items.removeAll { $0.id == id }
     }
 
     func mood(of item: SystemNotification, at now: Date) -> MascotMood {
         if let until = celebratingUntil[item.id], until > now { return .done }
-        if item.status == .idle, now.timeIntervalSince(item.receivedAt) > 180 { return .sleep }
+        if item.status == .idle, now.timeIntervalSince(item.receivedAt) > sleepAfter { return .sleep }
         return item.status?.mascotMood ?? .idle
+    }
+
+    /// The Dev tab's order: waiting first, then running, finished, idle, and
+    /// sleeping idle last. Stable within a priority, so rows move only when
+    /// their state does. The closed notch keeps `items` order instead.
+    var sortedItems: [SystemNotification] {
+        let now = Date()
+        return items.enumerated()
+            .sorted { lhs, rhs in
+                let a = priority(of: lhs.element, at: now)
+                let b = priority(of: rhs.element, at: now)
+                return a != b ? a < b : lhs.offset < rhs.offset
+            }
+            .map(\.element)
+    }
+
+    private func priority(of item: SystemNotification, at now: Date) -> Int {
+        if let until = celebratingUntil[item.id], until > now { return 2 }
+        switch item.status {
+        case .wait: return 0
+        case .run: return 1
+        case .ok: return 2
+        case .idle: return now.timeIntervalSince(item.receivedAt) > sleepAfter ? 4 : 3
+        case .info, .fail, .none: return 3
+        }
+    }
+
+    private func playSound(for status: DevEventStatus?) {
+        guard Self.soundsEnabled else { return }
+        let name: String
+        switch status {
+        case .ok: name = "Glass"
+        case .fail: name = "Basso"
+        case .wait: name = "Ping"
+        default: return
+        }
+        NSSound(named: name)?.play()
     }
 
     private func upsert(_ event: SystemNotification) {
         if let index = items.firstIndex(where: { $0.id == event.id }) {
-            // Detail-only updates keep the clock of the state they belong to.
+            // Detail-only updates keep the clock of the state they belong to,
+            // and a prompt stays until a new one replaces it.
             var event = event
             if items[index].status == event.status { event.receivedAt = items[index].receivedAt }
+            if event.prompt == nil { event.prompt = items[index].prompt }
             items[index] = event
         } else {
             items.append(event)

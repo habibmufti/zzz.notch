@@ -19,6 +19,9 @@ struct SystemNotification: Identifiable, Equatable {
     var status: DevEventStatus? = nil
     var actionURL: URL? = nil
     var displayDuration: TimeInterval? = nil
+    var activity: String? = nil
+    var agents: Int? = nil
+    var prompt: String? = nil
 }
 
 @MainActor

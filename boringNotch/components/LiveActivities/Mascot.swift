@@ -15,6 +15,7 @@ import SwiftUI
 
 enum MascotMood { case idle, working, waiting, done, sleep }
 enum MascotKind: CaseIterable { case blob, robot, cat }
+enum MascotActivity: String { case type, search, build, push, read }
 
 /// Stable per-id look: the same session keeps its character and colour.
 struct MascotLook: Equatable {
@@ -145,12 +146,36 @@ private enum Draw {
             }
         }
     }
+
+    static func rocket(_ f: inout MascotFrame, x: Int, y: Int, flicker: Bool) {
+        f.set(x, y - 3, "M")                                                     // nose
+        f.rect(x - 1, y - 2, x + 1, y + 1, "W"); f.set(x, y - 1, "S")           // hull, porthole
+        f.set(x - 2, y + 1, "M"); f.set(x + 2, y + 1, "M")                       // fins
+        f.rect(x - 1, y + 2, x + 1, y + 2, "L")                                  // nozzle
+        f.set(x, y + 3, "Y")                                                     // flame
+        if flicker { f.set(x - 1, y + 3, "M"); f.set(x + 1, y + 3, "M"); f.set(x, y + 4, "Y") }
+        else { f.set(x, y + 4, "M") }
+    }
+
+    /// 3x5 digit glyphs, row-major, bit set = lit.
+    static let digits = [
+        "111101101101111", "010110010010111", "111001111100111", "111001111001111", "101101111001001",
+        "111100111001111", "111100111101111", "111001001001001", "111101111101111", "111101111001111",
+    ]
+
+    /// Count in the top-left corner (1…9; larger shows 9). The notch background is black, so no outline.
+    static func badge(_ f: inout MascotFrame, _ n: Int) {
+        for (i, c) in Array(digits[min(max(n, 1), 9)]).enumerated() where c == "1" {
+            f.set(i % 3, i / 3, "Y")
+        }
+    }
 }
 
 // MARK: - scenes
 
 private enum MascotScene {
-    static func render(_ mood: MascotMood, kind: MascotKind, t: Double, seed: Int, music m: MascotMusic) -> MascotFrame {
+    static func render(_ mood: MascotMood, kind: MascotKind, t: Double, seed: Int, music m: MascotMusic,
+                       activity: MascotActivity, badge: Int) -> MascotFrame {
         var f = MascotFrame()
         var p = Pose()
         var front: ((inout MascotFrame) -> Void)?
@@ -178,19 +203,93 @@ private enum MascotScene {
         case .working:
             let k = Int(t * 9)                                           // keystroke clock
             let thinking = hash01(Int(t * 1.3) &+ seed &+ 77) < 0.2      // pause bursts
-            p.eyes = isBlinking(t, seed: seed) ? .closed : (thinking ? .open : .down)
-            p.lookY = thinking ? -1 : 0
-            p.lookX = thinking ? (hash01(Int(t * 1.3) &+ seed) < 0.5 ? -1 : 1) : 0
             p.antenna = m.listening && m.level > 0.6 ? "M" : (k % 4 < 2 ? "S" : "D")
-            let leftHand = hash01(k &+ seed) < 0.5
-            front = { f in
-                f.rect(3, 11, 12, 11, "L"); f.rect(2, 12, 13, 13, "L")   // laptop
-                f.rect(4, 12, 11, 12, "S")
-                if thinking {
-                    f.set(4, 10, "B"); f.set(11, 10, "B")
+            switch activity {
+            case .type:
+                p.eyes = isBlinking(t, seed: seed) ? .closed : (thinking ? .open : .down)
+                p.lookY = thinking ? -1 : 0
+                p.lookX = thinking ? (hash01(Int(t * 1.3) &+ seed) < 0.5 ? -1 : 1) : 0
+                let leftHand = hash01(k &+ seed) < 0.5
+                front = { f in
+                    f.rect(3, 11, 12, 11, "L"); f.rect(2, 12, 13, 13, "L")   // laptop
+                    f.rect(4, 12, 11, 12, "S")
+                    if thinking {
+                        f.set(4, 10, "B"); f.set(11, 10, "B")
+                    } else {
+                        for x in 4...11 where hash01(k &* 31 &+ x) < 0.25 { f.set(x, 12, "C") }
+                        f.set(leftHand ? 5 : 4, 10, "B"); f.set(leftHand ? 10 : 11, 10, "B")
+                    }
+                }
+
+            case .search:
+                // magnifier sweeps across the lower body and dwells at both ends
+                let slot = floor(t / 5), local = t - slot * 5
+                let s = max(-1, min(1, sin(2 * .pi * t / 2.4) * 1.4))
+                let x0 = 1 + Int(((s + 1) / 2 * 7).rounded())                 // lens left edge, 1…8
+                let peering = local > 3 && local < 3.8 && hash01(Int(slot) &+ seed &+ 31) < 0.5
+                p.eyes = peering ? .wide : (isBlinking(t, seed: seed) ? .closed : .open)
+                p.lookX = x0 + 2 < 5 ? -1 : (x0 + 2 > 6 ? 1 : 0)
+                let gy = 10
+                front = { f in
+                    f.rect(x0 + 1, gy, x0 + 3, gy, "L"); f.rect(x0, gy + 1, x0, gy + 3, "L")
+                    f.rect(x0 + 4, gy + 1, x0 + 4, gy + 3, "L"); f.rect(x0 + 1, gy + 4, x0 + 3, gy + 4, "L")
+                    f.rect(x0 + 1, gy + 1, x0 + 3, gy + 3, "C"); f.set(x0 + 1, gy + 1, "W")   // glass
+                    f.set(x0 + 4, gy + 4, "D"); f.set(x0 + 5, gy + 5, "D")                     // handle
+                }
+
+            case .build:
+                p.eyes = isBlinking(t, seed: seed) ? .closed : .down
+                let sx = 7 + Int((2 * sin(2 * .pi * t / 1.2)).rounded())     // bowl sways 5…9
+                front = { f in
+                    f.rect(2, 11, 13, 11, "L"); f.rect(3, 12, 12, 13, "N")  // pot rim and body
+                    f.rect(sx, 12, sx + 1, 12, "Y")                         // spoon bowl
+                    let run = Double(12 - sx)                               // handle run, at least 3
+                    for x in (sx + 2)...12 { f.set(x, Int((10 + Double(13 - x) * 2 / run).rounded()), "D") }
+                    f.set(13, 10, "B")                                      // hand
+                    for i in 0..<2 {
+                        let ph = (t / 1.8 + Double(i) / 2).truncatingRemainder(dividingBy: 1)
+                        guard ph < 0.9 else { continue }
+                        let y = 9 - Int(ph * 7), x = 13 + (sin(ph * 6 + Double(i)) > 0 ? 1 : 0)
+                        let c: Character = ph < 0.5 ? "W" : "C"
+                        f.rect(x, y, x + 1, y, c); f.set(x, y - 1, c)
+                    }
+                }
+
+            case .push:
+                let ph = t.truncatingRemainder(dividingBy: 2.5) / 2.5
+                p.lookY = -1                                                 // eyes up after the rocket
+                p.eyes = isBlinking(t, seed: seed) ? .closed : .open
+                if ph >= 0.15 && ph < 0.3 { p.squash = ph < 0.2 ? 2 : 1 }    // liftoff squash
+                let rocketY: Int?
+                if ph < 0.15 {
+                    rocketY = 12                                             // parked on the right
+                } else if ph < 0.55 {
+                    let q = (ph - 0.15) / 0.4
+                    rocketY = 12 - Int((q * q * 20).rounded())               // accelerating climb
+                } else if ph < 0.85 {
+                    rocketY = nil                                            // out of frame
                 } else {
-                    for x in 4...11 where hash01(k &* 31 &+ x) < 0.25 { f.set(x, 12, "C") }
-                    f.set(leftHand ? 5 : 4, 10, "B"); f.set(leftHand ? 10 : 11, 10, "B")
+                    let q = (ph - 0.85) / 0.15
+                    rocketY = 20 - Int((q * 8).rounded())                    // re-enters from below
+                }
+                let flicker = Int(t * 12) % 2 == 0
+                front = { f in
+                    if let y = rocketY { Draw.rocket(&f, x: 13, y: y, flicker: flicker) }
+                }
+
+            case .read:
+                p.eyes = isBlinking(t, seed: seed) ? .closed : .down
+                let flip = t.truncatingRemainder(dividingBy: 1.5) / 1.5      // page turns in the last fifth
+                front = { f in
+                    f.rect(1, 11, 14, 14, "P")                               // cover
+                    f.rect(2, 11, 6, 13, "W"); f.rect(9, 11, 13, 13, "W")    // pages
+                    f.rect(7, 11, 8, 13, "P")                                // spine
+                    f.rect(3, 12, 5, 12, "L"); f.rect(10, 12, 12, 12, "L")   // text
+                    guard flip >= 0.8 else { return }
+                    let u = (flip - 0.8) / 0.2
+                    let w = Int((5 * abs(cos(.pi * u))).rounded())
+                    if u < 0.5 { f.rect(8, 11, 7 + w, 13, "W") }             // lifting off the right page
+                    else { f.rect(8 - w, 11, 7, 13, "W") }                   // settling onto the left
                 }
             }
 
@@ -266,6 +365,7 @@ private enum MascotScene {
         Draw.eyes(&f, p, kind: kind)
         front?(&f)
         over?(&f)
+        if badge > 0 { Draw.badge(&f, badge) }                                   // count, always on top
         return f
     }
 
@@ -392,6 +492,8 @@ final class MascotMusicCue {
 final class MascotLayerView: NSView {
     var look = MascotLook(id: "") { didSet { if look != oldValue { palette = MascotImage.palette(look) } } }
     var mood: @MainActor () -> MascotMood = { .idle }
+    var activity: @MainActor () -> MascotActivity = { .type }
+    var badge: @MainActor () -> Int = { 0 }
 
     private lazy var palette = MascotImage.palette(look)
     private var timer: Timer?
@@ -472,7 +574,8 @@ final class MascotLayerView: NSView {
         } else if let r = cue.reaction {
             m.reaction = r; m.age = now.timeIntervalSince(cue.reactionAt)
         }
-        let frame = MascotScene.render(mood(), kind: look.kind, t: t, seed: look.seed, music: m)
+        let frame = MascotScene.render(mood(), kind: look.kind, t: t, seed: look.seed, music: m,
+                                       activity: activity(), badge: badge())
         layer?.contents = MascotImage.make(frame, palette: palette)
     }
 }
@@ -480,11 +583,15 @@ final class MascotLayerView: NSView {
 struct MascotView: NSViewRepresentable {
     let look: MascotLook
     let mood: @MainActor () -> MascotMood
+    var activity: @MainActor () -> MascotActivity = { .type }
+    var badge: @MainActor () -> Int = { 0 }
 
     func makeNSView(context: Context) -> MascotLayerView { MascotLayerView(frame: .zero) }
 
     func updateNSView(_ view: MascotLayerView, context: Context) {
         view.look = look
         view.mood = mood
+        view.activity = activity
+        view.badge = badge
     }
 }

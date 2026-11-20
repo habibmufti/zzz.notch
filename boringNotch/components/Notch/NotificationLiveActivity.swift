@@ -121,9 +121,23 @@ struct NotificationLiveActivity: View {
 
 struct NotificationExpandedView: View {
     @ObservedObject private var manager = SystemNotificationManager.shared
+    @ObservedObject private var askCenter = DevAskCenter.shared
     let notification: SystemNotification
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            card
+            // A dev tool asking a question: answer it right here.
+            if let ask = askCenter.pending[notification.id] {
+                DevAskView(ask: ask)
+                    .padding(.horizontal, 4)
+            }
+        }
+        .onAppear { manager.holdActive() }
+        .onDisappear { manager.resumeDismiss() }
+    }
+
+    private var card: some View {
         ZStack(alignment: .topTrailing) {
             Button(action: openSourceApp) {
                 HStack(alignment: .center, spacing: 12) {
@@ -201,8 +215,6 @@ struct NotificationExpandedView: View {
             }
             .padding(.trailing, 4)
         }
-        .onAppear { manager.holdActive() }
-        .onDisappear { manager.resumeDismiss() }
     }
 
     private func openSourceApp() {
