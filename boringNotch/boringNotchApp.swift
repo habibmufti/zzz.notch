@@ -64,7 +64,6 @@ struct DynamicNotchApp: App {
         // Initialize the settings window controller with the updater controller
         SettingsWindowController.shared.setUpdaterController(updaterController)
 
-        let updaterController = self.updaterController
         Task { @MainActor in
             let sourceURL = Bundle.main.bundleURL
             if let destinationURL = LegacyAppBundleMigration.destinationURL(for: sourceURL) {
@@ -80,12 +79,13 @@ struct DynamicNotchApp: App {
                 }
                 NSLog("Failed to migrate legacy Boring Notch app bundle at %@", sourceURL.path)
             }
-            updaterController.startUpdater()
+            // Sparkle stays unstarted until zzz.notch has its own signed appcast;
+            // the bundled feed still points at upstream Boring Notch releases.
         }
     }
 
     var body: some Scene {
-        MenuBarExtra("boring.notch", systemImage: "sparkle", isInserted: $showMenuBarIcon) {
+        MenuBarExtra("zzz.notch", systemImage: "sparkle", isInserted: $showMenuBarIcon) {
             Button("Settings") {
                 DispatchQueue.main.async {
                     SettingsWindowController.shared.showWindow()
@@ -93,7 +93,7 @@ struct DynamicNotchApp: App {
             }
             .keyboardShortcut(KeyEquivalent(","), modifiers: .command)
             CheckForUpdatesView(updater: updaterController.updater)
-            Button("Restart Boring Notch") {
+            Button("Restart zzz.notch") {
                 ApplicationRelauncher.restart()
             }
             Button("Quit", role: .destructive) {
