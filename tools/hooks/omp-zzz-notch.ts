@@ -272,7 +272,8 @@ export default function (pi: HookAPI): void {
 		}
 		dropPending();
 		const summary = finalSummary(event) ?? "Done";
-		void set(ctx.cwd, summary, "ok", [], ctx).then(() => set(ctx.cwd, "Idle", "idle", [], ctx));
+		// Idle keeps the summary so the card can still show what got done.
+		void set(ctx.cwd, summary, "ok", [], ctx).then(() => set(ctx.cwd, summary, "idle", [], ctx));
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
