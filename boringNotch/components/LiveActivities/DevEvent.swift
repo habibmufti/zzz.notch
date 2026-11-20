@@ -16,6 +16,7 @@
 //
 
 import AppKit
+import Defaults
 import SwiftUI
 
 enum DevEventStatus: String {
@@ -105,9 +106,6 @@ enum DevEventURL {
 @MainActor
 final class DevActivityStore: ObservableObject {
     static let shared = DevActivityStore()
-
-    /// Whether `ok`/`fail` results and `wait` popups play a system sound.
-    static var soundsEnabled = true
 
     /// Ongoing events, in the order their ids first appeared, so each
     /// session's mascot keeps its spot in the notch.
@@ -209,7 +207,7 @@ final class DevActivityStore: ObservableObject {
     }
 
     private func playSound(for status: DevEventStatus?) {
-        guard Self.soundsEnabled else { return }
+        guard Defaults[.devSounds] else { return }
         let name: String
         switch status {
         case .ok: name = "Glass"

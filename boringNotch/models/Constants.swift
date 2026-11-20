@@ -479,6 +479,14 @@ extension Defaults.Keys {
         default: MusicControlButton.defaultLayout.count
     )
 
+    // MARK: Dev tools
+    static let devSounds = Key<Bool>("devSounds", default: true)
+    static let devMascotMusic = Key<Bool>("devMascotMusic", default: true)
+    static let devMascotMusicControls = Key<Bool>("devMascotMusicControls", default: true)
+    static let devSubagentBadge = Key<Bool>("devSubagentBadge", default: true)
+    static let devAskInNotch = Key<Bool>("devAskInNotch", default: true)
+    static let devAskTimeout = Key<Int>("devAskTimeout", default: 120)
+
     // MARK: Downloads
     static let enableDownloadListener = Key<Bool>("enableDownloadListener", default: true)
     static let enableSafariDownloads = Key<Bool>("enableSafariDownloads", default: true)

@@ -11,6 +11,7 @@
 
 import AppKit
 import Combine
+import Defaults
 import SwiftUI
 
 enum MascotMood { case idle, working, waiting, done, sleep }
@@ -545,7 +546,7 @@ final class MascotLayerView: NSView {
     override func mouseDown(with event: NSEvent) {
         pokedAt = Date()
         let music = MusicManager.shared
-        guard !music.isPlayerIdle else { return }
+        guard Defaults[.devMascotMusicControls], !music.isPlayerIdle else { return }
         pendingToggle?.cancel()
         if event.clickCount >= 2 {
             pendingToggle = nil
@@ -562,7 +563,8 @@ final class MascotLayerView: NSView {
         let now = Date()
         let t = now.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 100_000)
         let cue = MascotMusicCue.shared
-        var m = MascotMusic(listening: MusicManager.shared.isPlaying, gaze: gaze)
+        let musicOn = Defaults[.devMascotMusic]
+        var m = MascotMusic(listening: musicOn && MusicManager.shared.isPlaying, gaze: gaze)
         if m.listening {
             let target = cue.level(at: t)
             level = target > level ? target : level * 0.85 + target * 0.15
@@ -571,7 +573,7 @@ final class MascotLayerView: NSView {
         let pokeAge = now.timeIntervalSince(pokedAt)
         if pokeAge < MascotMusic.reactionLength {
             m.reaction = .poke; m.age = pokeAge
-        } else if let r = cue.reaction {
+        } else if musicOn, let r = cue.reaction {
             m.reaction = r; m.age = now.timeIntervalSince(cue.reactionAt)
         }
         let frame = MascotScene.render(mood(), kind: look.kind, t: t, seed: look.seed, music: m,

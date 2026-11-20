@@ -14,6 +14,7 @@
 
 import AppKit
 import Darwin
+import Defaults
 import SwiftUI
 
 struct DevAsk: Identifiable, Sendable {
@@ -222,11 +223,16 @@ final class DevAskSocket: @unchecked Sendable {
             reply(id, [])
             return
         }
+        guard Defaults[.devAskInNotch] else {
+            reply(id, [])
+            return
+        }
         onEvent?(.received(client: id, request: request))
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.setEventHandler { [weak self] in self?.reply(id, []) }
-        timer.schedule(deadline: .now() + request.timeout)
+        let ceiling = TimeInterval(min(max(Defaults[.devAskTimeout], 5), 600))
+        timer.schedule(deadline: .now() + min(request.timeout, ceiling))
         timer.resume()
         connections[id]?.timer = timer
     }

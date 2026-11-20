@@ -23,6 +23,8 @@ type Activity = "type" | "search" | "build" | "push" | "read";
 /// process (each session loads this hook separately).
 interface Shared {
 	cwd?: string;
+	/// omp's session title, shown next to the project name.
+	title?: string;
 	status: Status;
 	body: string;
 	agents: number;
@@ -32,6 +34,38 @@ const shared: Shared = ((globalThis as Record<string, unknown>).__zzzNotch ??= {
 	body: "Idle",
 	agents: 0,
 }) as Shared;
+
+function oneLine(text: string, max: number): string {
+	const line = text.replace(/[`*_#>]/g, "").replace(/\s+/g, " ").trim();
+	return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/// The session title omp generated, if this omp exposes one.
+function sessionTitle(ctx: unknown): string | undefined {
+	if (!ctx || typeof ctx !== "object" || !("sessionManager" in ctx)) return undefined;
+	const manager = ctx.sessionManager;
+	if (!manager || typeof manager !== "object" || !("getSessionName" in manager)) return undefined;
+	const get = manager.getSessionName;
+	const name = typeof get === "function" ? get.call(manager) : undefined;
+	return typeof name === "string" && name.trim() ? oneLine(name, 60) : undefined;
+}
+
+/// First sentence of the agent's final reply: what got done.
+function finalSummary(event: unknown): string | undefined {
+	if (!event || typeof event !== "object" || !("messages" in event) || !Array.isArray(event.messages)) return undefined;
+	for (const message of [...event.messages].reverse()) {
+		if (!message || typeof message !== "object" || !("role" in message) || message.role !== "assistant") continue;
+		const content = "content" in message ? message.content : undefined;
+		const text = typeof content === "string"
+			? content
+			: Array.isArray(content)
+				? content.map(part => (part && typeof part === "object" && "text" in part && typeof part.text === "string" ? part.text : "")).join(" ")
+				: "";
+		const first = text.trim().split(/(?<=[.!?])\s|\n/)[0] ?? "";
+		if (first.trim()) return oneLine(first, 140);
+	}
+	return undefined;
+}
 
 function argsOf(input: unknown): Record<string, unknown> {
 	return (input ?? {}) as Record<string, unknown>;
@@ -96,14 +130,15 @@ export default function (pi: HookAPI): void {
 		shared.cwd
 			? zzz([
 					"notify", path.basename(shared.cwd), shared.body,
-					"--source", "omp", "--status", shared.status, "--symbol", "sparkles",
+					"--source", shared.title ?? "omp", "--status", shared.status, "--symbol", "sparkles",
 					"--app", process.env.__CFBundleIdentifier ?? "",
 					"--id", id, "--agents", String(shared.agents),
 					...extra,
 				])
 			: Promise.resolve(undefined);
-	const set = (cwd: string, body: string, status: Status, extra: string[] = []) => {
+	const set = (cwd: string, body: string, status: Status, extra: string[] = [], ctx?: unknown) => {
 		shared.cwd = cwd;
+		shared.title = sessionTitle(ctx) ?? shared.title;
 		shared.body = body;
 		shared.status = status;
 		return send(extra);
@@ -171,14 +206,15 @@ export default function (pi: HookAPI): void {
 		if (ctx.hasUI) void set(ctx.cwd, "Idle", "idle");
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_end", async (event, ctx) => {
 		if (!ctx.hasUI) {
 			shared.agents = Math.max(0, shared.agents - 1);
 			void send();
 			return;
 		}
 		dropPending();
-		void set(ctx.cwd, "Done", "ok").then(() => set(ctx.cwd, "Idle", "idle"));
+		const summary = finalSummary(event) ?? "Done";
+		void set(ctx.cwd, summary, "ok", [], ctx).then(() => set(ctx.cwd, "Idle", "idle", [], ctx));
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {

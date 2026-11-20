@@ -19,6 +19,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case osd
     case notifications
     case shortcuts
+    case dev
     case about
 
     enum Icon {
@@ -39,6 +40,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .osd: "OSD"
         case .notifications: "Notifications"
         case .shortcuts: "Shortcuts"
+        case .dev: "Dev"
         case .about: "About"
         }
     }
@@ -54,6 +56,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         case .osd: .system("dial.medium.fill")
         case .notifications: .system("bell.badge")
         case .shortcuts: .system("keyboard")
+        case .dev: .system("terminal")
         case .about: .system("info.circle")
         }
     }
@@ -101,6 +104,8 @@ struct SettingsView: View {
                     ShelfSettingsView()
                 case .shortcuts:
                     ShortcutsSettingsView()
+                case .dev:
+                    DevSettingsView()
                 case .about:
                     if let controller = updaterController {
                         AboutView(updaterController: controller)

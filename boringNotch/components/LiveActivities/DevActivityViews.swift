@@ -3,6 +3,7 @@
 //  zzz.notch
 //
 
+import Defaults
 import SwiftUI
 
 /// Closed-notch pill for ongoing dev events: one pixel mascot per id,
@@ -60,7 +61,7 @@ struct DevActivityLiveActivity: View {
                     look: MascotLook(id: item.id),
                     mood: { store.mood(of: item, at: Date()) },
                     activity: { mascotActivity(of: item) },
-                    badge: { item.agents ?? 0 }
+                    badge: { Defaults[.devSubagentBadge] ? (item.agents ?? 0) : 0 }
                 )
                 .frame(width: size, height: size)
             }
@@ -95,6 +96,7 @@ struct DevActivityListView: View {
 private struct DevActivityRow: View {
     @ObservedObject private var store = DevActivityStore.shared
     @ObservedObject private var askCenter = DevAskCenter.shared
+    @Default(.devSubagentBadge) private var subagentBadge
     let item: SystemNotification
     @State private var hovering = false
 
@@ -105,7 +107,7 @@ private struct DevActivityRow: View {
                     look: MascotLook(id: item.id),
                     mood: { store.mood(of: item, at: Date()) },
                     activity: { mascotActivity(of: item) },
-                    badge: { item.agents ?? 0 }
+                    badge: { Defaults[.devSubagentBadge] ? (item.agents ?? 0) : 0 }
                 )
                 .frame(width: 32, height: 32)
 
@@ -122,7 +124,7 @@ private struct DevActivityRow: View {
                                     .font(.system(size: 11))
                                     .foregroundStyle(.tertiary)
                             }
-                            if let agents = item.agents, agents > 0 {
+                            if subagentBadge, let agents = item.agents, agents > 0 {
                                 Text("\(agents) agents")
                                     .font(.system(size: 10, weight: .medium))
                                     .foregroundStyle(.secondary)
