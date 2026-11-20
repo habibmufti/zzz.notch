@@ -90,6 +90,53 @@ function activityOf(tool: string, input: unknown): Activity {
 	return "type";
 }
 
+const NOW_LABEL: Record<string, string> = {
+	bash: "Running a command", read: "Reading", write: "Writing a file", edit: "Editing",
+	grep: "Searching code", glob: "Finding files", find: "Finding files", lsp: "Inspecting code",
+	web_search: "Searching the web", task: "Starting agents", todo: "Updating the plan", eval: "Running code",
+};
+
+/// Card lines for the current step: headline, why, and the raw target.
+function stepOf(tool: string, input: unknown): string[] {
+	const args = argsOf(input);
+	const str = (k: string) => (typeof args[k] === "string" ? oneLine(String(args[k]), 160) : "");
+	const target = ["command", "path", "pattern", "query", "url", "code"].map(str).find(Boolean) ?? "";
+	const out = ["--now", NOW_LABEL[tool] ?? `Using ${tool}`];
+	if (str("i")) out.push("--intent", str("i"));
+	if (target) out.push("--command", target);
+	return out;
+}
+
+/// "Step 3 of 5 · Writing the auth tests" from omp's todo phases.
+function planStepOf(details: unknown): string | undefined {
+	if (!details || typeof details !== "object" || !("phases" in details) || !Array.isArray(details.phases)) return undefined;
+	const tasks: { content: string; status: string }[] = [];
+	for (const phase of details.phases) {
+		if (!phase || typeof phase !== "object" || !("tasks" in phase) || !Array.isArray(phase.tasks)) continue;
+		for (const t of phase.tasks) {
+			if (t && typeof t === "object" && "content" in t && "status" in t) tasks.push({ content: String(t.content), status: String(t.status) });
+		}
+	}
+	const live = tasks.filter(t => t.status !== "abandoned" && t.status !== "dropped");
+	if (live.length === 0) return undefined;
+	const index = live.findIndex(t => t.status === "in_progress");
+	if (index < 0) return live.every(t => t.status === "completed" || t.status === "done") ? `All ${live.length} steps done` : undefined;
+	return `Step ${index + 1} of ${live.length} · ${oneLine(live[index].content, 100)}`;
+}
+
+/// "Name · task" per subagent the `task` tool is starting.
+function agentListOf(input: unknown): string | undefined {
+	const tasks = argsOf(input).tasks;
+	if (!Array.isArray(tasks)) return undefined;
+	const lines = tasks.map((t, n) => {
+		const a = argsOf(t);
+		const name = typeof a.name === "string" ? a.name : `Agent ${n + 1}`;
+		const what = typeof a.task === "string" ? oneLine(a.task.replace(/^#.*$/m, ""), 80) : "";
+		return what ? `${name} · ${what}` : name;
+	});
+	return lines.length ? lines.join("\n") : undefined;
+}
+
 function strip(html: string): string {
 	return html.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\s+/g, " ").trim();
 }
@@ -178,7 +225,11 @@ export default function (pi: HookAPI): void {
 	pi.on("tool_call", async (event, ctx) => {
 		if (!ctx.hasUI) return;
 		if (event.toolName !== "ask") {
-			pending = ["--detail", describe(event.toolName, event.input), "--activity", activityOf(event.toolName, event.input)];
+			pending = ["--detail", describe(event.toolName, event.input), "--activity", activityOf(event.toolName, event.input), ...stepOf(event.toolName, event.input)];
+			if (event.toolName === "task") {
+				const list = agentListOf(event.input);
+				if (list) void send(["--agent-list", list]);
+			}
 			timer ??= setTimeout(flush, DETAIL_INTERVAL_MS);
 			return;
 		}
@@ -201,7 +252,12 @@ export default function (pi: HookAPI): void {
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
-		if (ctx.hasUI && event.toolName === "ask") void set(ctx.cwd, "Working", "run");
+		if (!ctx.hasUI) return;
+		if (event.toolName === "ask") void set(ctx.cwd, "Working", "run");
+		if (event.toolName === "todo") {
+			const step = "details" in event ? planStepOf(event.details) : undefined;
+			if (step) void send(["--step", step]);
+		}
 	});
 
 	pi.on("session_start", async (_event, ctx) => {

@@ -22,6 +22,16 @@ struct SystemNotification: Identifiable, Equatable {
     var activity: String? = nil
     var agents: Int? = nil
     var prompt: String? = nil
+    /// Headline of the current step, e.g. "Running a command".
+    var now: String? = nil
+    /// Why the current step runs, e.g. "Run the auth tests".
+    var intent: String? = nil
+    /// Raw command, path or pattern of the current step; shown monospaced.
+    var command: String? = nil
+    /// Plan position, e.g. "Step 3 of 5 · Writing the auth tests".
+    var step: String? = nil
+    /// Running subagents, one per line as "name · task".
+    var agentList: String? = nil
 }
 
 @MainActor

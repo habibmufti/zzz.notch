@@ -43,6 +43,18 @@ struct DevSettingsView: View {
             }
 
             Section {
+                Defaults.Toggle(key: .devVerboseCard) {
+                    Text("Detailed session card")
+                }
+            } header: {
+                Text("Dev tab")
+            } footer: {
+                Text("Shows task, current step, plan, subagents and recent actions. Off: one compact row per session.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 Defaults.Toggle(key: .devAskInNotch) {
                     Text("Show questions in the notch")
                 }

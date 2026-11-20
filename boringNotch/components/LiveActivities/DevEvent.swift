@@ -53,7 +53,10 @@ enum DevEventStatus: String {
 /// time for one-off events, lifetime for ongoing ones),
 /// `activity` (type|search|build|push|read: the mascot's pose),
 /// `agents` (running subagent count, shown as a badge),
-/// `prompt` (the user's request, shown in place of `body` while set).
+/// `prompt` (the user's request, shown in place of `body` while set),
+/// `now` (headline of the current step), `intent` (why), `command` (raw
+/// command, path or pattern, monospaced), `step` (plan position, sticky),
+/// `agentList` (running subagents, one "name · task" per line, sticky; `agents=0` clears it).
 /// `zzznotch://clear?id=…` drops the ongoing state with that id.
 enum DevEventURL {
     static let scheme = "zzznotch"
@@ -77,7 +80,12 @@ enum DevEventURL {
             displayDuration: query["duration"].flatMap(TimeInterval.init).map { min(max($0, 1), 86_400) },
             activity: query["activity"],
             agents: query["agents"].flatMap(Int.init),
-            prompt: query["prompt"]
+            prompt: query["prompt"],
+            now: query["now"],
+            intent: query["intent"],
+            command: query["command"],
+            step: query["step"],
+            agentList: query["agentList"]
         )
     }
 
@@ -221,10 +229,17 @@ final class DevActivityStore: ObservableObject {
     private func upsert(_ event: SystemNotification) {
         if let index = items.firstIndex(where: { $0.id == event.id }) {
             // Detail-only updates keep the clock of the state they belong to,
-            // and a prompt stays until a new one replaces it.
+            // and a prompt, step or agent list stays until a new one replaces it.
             var event = event
             if items[index].status == event.status { event.receivedAt = items[index].receivedAt }
             if event.prompt == nil { event.prompt = items[index].prompt }
+            if event.step == nil { event.step = items[index].step }
+            // `agents=0` says no subagents are left; otherwise a missing list carries over.
+            if event.agents == 0 {
+                event.agentList = nil
+            } else if event.agentList == nil {
+                event.agentList = items[index].agentList
+            }
             items[index] = event
         } else {
             items.append(event)

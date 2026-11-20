@@ -484,6 +484,7 @@ extension Defaults.Keys {
     static let devMascotMusic = Key<Bool>("devMascotMusic", default: true)
     static let devMascotMusicControls = Key<Bool>("devMascotMusicControls", default: true)
     static let devSubagentBadge = Key<Bool>("devSubagentBadge", default: true)
+    static let devVerboseCard = Key<Bool>("devVerboseCard", default: true)
     static let devAskInNotch = Key<Bool>("devAskInNotch", default: true)
     static let devAskTimeout = Key<Int>("devAskTimeout", default: 120)
 

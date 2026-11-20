@@ -5,6 +5,8 @@
 #              [--symbol SF_SYMBOL] [--app BUNDLE_ID] [--url URL] [--id KEY]
 #              [--duration SECONDS] [--detail "current step"]
 #              [--activity type|search|build|push|read] [--agents N] [--prompt "text"]
+#              [--now "headline"] [--intent "why"] [--command "raw command"] [--step "plan position"]
+#              [--agent-list "name · task" (one subagent per line)]
 #   zzz clear --id KEY
 #   zzz ask "question" --id KEY --option A [--option B ...] [--multiple] [--timeout S]
 #              waits for an answer in the notch and prints the chosen option(s), one per line.
@@ -17,7 +19,7 @@
 # Works with macOS /bin/bash 3.2.
 set -eu
 
-usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
 
 urlencode() {
   local LC_ALL=C
@@ -76,12 +78,15 @@ case ${1:-} in
   *) usage >&2; exit 2 ;;
 esac
 
-title= body= status= source= symbol= app= url= id= duration= detail= activity= agents= prompt= npos=0
+title= body= status= source= symbol= app= url= id= duration= detail= activity= agents= prompt= now= intent= command= step= agentlist= npos=0
 while [ $# -gt 0 ]; do
   case $1 in
-    --status|--source|--symbol|--app|--url|--id|--duration|--detail|--activity|--agents|--prompt)
+    --status|--source|--symbol|--app|--url|--id|--duration|--detail|--activity|--agents|--prompt|--now|--intent|--command|--step)
       [ $# -ge 2 ] || { echo "zzz: $1 needs a value" >&2; exit 2; }
       eval "${1#--}=\$2"; shift 2 ;;
+    --agent-list)
+      [ $# -ge 2 ] || { echo "zzz: $1 needs a value" >&2; exit 2; }
+      agentlist=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "zzz: unknown option $1" >&2; exit 2 ;;
     *)
@@ -101,10 +106,11 @@ else
 fi
 
 query=
-for key in title body status source symbol app url id duration detail activity agents prompt; do
+for key in title body status source symbol app url id duration detail activity agents prompt now intent command step agentlist; do
   eval "value=\$$key"
   [ -n "$value" ] || continue
-  query="$query${query:+&}$key=$(urlencode "$value")"
+  if [ "$key" = agentlist ]; then name=agentList; else name=$key; fi
+  query="$query${query:+&}$name=$(urlencode "$value")"
 done
 
 if [ -n "${ZZZ_DRY_RUN:-}" ]; then
