@@ -144,7 +144,8 @@ private struct DevActivityRow: View {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
-                        if let detail = item.subtitle {
+                        // The current step only means something while it runs.
+                        if item.status == .run, let detail = item.subtitle {
                             Text(detail)
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(.tertiary)
