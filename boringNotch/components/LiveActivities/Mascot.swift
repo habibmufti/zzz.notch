@@ -10,6 +10,7 @@
 //
 
 import AppKit
+import Combine
 import SwiftUI
 
 enum MascotMood { case idle, working, waiting, done, sleep }
@@ -68,11 +69,36 @@ private struct Pose {
     var lookX = 0, lookY = 0
     var feet = true
     var antenna: Character = "G"
+    var headphonesDrop = 0  // headphones slipping down to the neck
+}
+
+// MARK: - music input
+
+/// One-shot reactions: music events are shared by every mascot, `poke` is
+/// per mascot (a click).
+enum MascotReaction: Equatable { case newTrack, skip, pause, resume, poke }
+
+/// Everything music-related a frame needs. `level` is 0…1 loudness.
+struct MascotMusic {
+    var listening = false
+    var level = 0.0
+    var reaction: MascotReaction?
+    var age = 0.0           // seconds since `reaction`
+    var gaze: Int?          // -1 / 0 / 1 toward the cursor while hovered
+    static let reactionLength = 1.4
 }
 
 // MARK: - drawing
 
 private enum Draw {
+    static func note(_ f: inout MascotFrame, _ x: Int, _ y: Int, _ c: Character) {
+        f.rect(x, y + 2, x + 1, y + 3, c); f.rect(x + 1, y, x + 1, y + 2, c); f.set(x + 2, y, c)
+    }
+
+    static func heart(_ f: inout MascotFrame, _ x: Int, _ y: Int, _ c: Character) {
+        f.set(x, y, c); f.set(x + 2, y, c); f.rect(x, y + 1, x + 2, y + 1, c); f.set(x + 1, y + 2, c)
+    }
+
     static func body(_ f: inout MascotFrame, _ p: Pose, kind: MascotKind) {
         let top = 4 + p.squash + p.dy, bottom = 13 + p.dy
         let widen = p.squash >= 2 ? 1 : 0
@@ -124,7 +150,7 @@ private enum Draw {
 // MARK: - scenes
 
 private enum MascotScene {
-    static func render(_ mood: MascotMood, kind: MascotKind, t: Double, seed: Int, headphones: Bool) -> MascotFrame {
+    static func render(_ mood: MascotMood, kind: MascotKind, t: Double, seed: Int, music m: MascotMusic) -> MascotFrame {
         var f = MascotFrame()
         var p = Pose()
         var front: ((inout MascotFrame) -> Void)?
@@ -132,9 +158,17 @@ private enum MascotScene {
 
         switch mood {
         case .idle:
-            if headphones {                                              // vibing: nod on the beat, eyes ^ ^
-                p.squash = Int(t * 4) % 2
+            if m.listening {                                             // vibing to the actual loudness
+                p.squash = m.level > 0.45 ? 1 : 0
+                p.dy = m.level > 0.8 ? -1 : 0
+                p.lookX = m.level > 0.65 ? (Int(t * 2) % 2 == 0 ? -1 : 1) : 0
                 p.eyes = isBlinking(t, seed: seed) ? .closed : .happy
+                let level = m.level
+                over = { f in
+                    guard level > 0.55 else { return }
+                    let ph = (t / 1.6 + Double(seed % 5) / 5).truncatingRemainder(dividingBy: 1)
+                    Draw.note(&f, 12 + Int((sin(ph * 9)).rounded()), 4 - Int(ph * 5), "Y")
+                }
             } else {
                 p.squash = sin(t * 2 * .pi / 3.2) > 0.75 ? 1 : 0       // slow breath
                 p.lookX = [-1, 0, 0, 1, 0][Int(hash01(Int(t / 2.2) &+ seed) * 5)]
@@ -147,7 +181,7 @@ private enum MascotScene {
             p.eyes = isBlinking(t, seed: seed) ? .closed : (thinking ? .open : .down)
             p.lookY = thinking ? -1 : 0
             p.lookX = thinking ? (hash01(Int(t * 1.3) &+ seed) < 0.5 ? -1 : 1) : 0
-            p.antenna = k % 4 < 2 ? "S" : "D"
+            p.antenna = m.listening && m.level > 0.6 ? "M" : (k % 4 < 2 ? "S" : "D")
             let leftHand = hash01(k &+ seed) < 0.5
             front = { f in
                 f.rect(3, 11, 12, 11, "L"); f.rect(2, 12, 13, 13, "L")   // laptop
@@ -212,9 +246,18 @@ private enum MascotScene {
             }
         }
 
+        if let g = m.gaze, mood != .sleep {
+            p.lookX = g
+            if p.eyes == .down { p.eyes = .open }
+        }
+        if let r = m.reaction, m.age < MascotMusic.reactionLength {
+            react(r, age: m.age, t: t, pose: &p, over: &over)
+        }
+
         Draw.body(&f, p, kind: kind)
-        if headphones {
-            let top = 4 + p.squash + p.dy, widen = p.squash >= 2 ? 1 : 0
+        let pausing = m.reaction == .pause && m.age < MascotMusic.reactionLength
+        if m.listening || pausing {
+            let top = 4 + p.squash + p.dy + p.headphonesDrop, widen = p.squash >= 2 ? 1 : 0
             let l = 3 - widen, r = 12 + widen
             f.rect(l + 1, top - 1, r - 1, top - 1, "N")                   // band
             f.rect(l - 1, top + 2, l, top + 5, "M"); f.rect(r, top + 2, r + 1, top + 5, "M")  // ear cups
@@ -224,6 +267,32 @@ private enum MascotScene {
         front?(&f)
         over?(&f)
         return f
+    }
+
+    /// Short override on top of whatever the mood is doing.
+    private static func react(_ r: MascotReaction, age a: Double, t: Double, pose p: inout Pose,
+                              over: inout ((inout MascotFrame) -> Void)?) {
+        let hop = { (h: Double, len: Double) -> Int in a < len ? -Int((h * sin(.pi * a / len)).rounded()) : 0 }
+        switch r {
+        case .poke:                                                      // squish, then a happy hop + heart
+            p.squash = a < 0.15 ? 2 : 0
+            p.dy = a < 0.15 ? 0 : hop(3, 0.6)
+            p.eyes = a < 0.15 ? .closed : .happy
+            over = { f in Draw.heart(&f, 12, max(0, 3 - Int(a * 3)), "P") }
+        case .newTrack, .resume:                                         // "ooh, a song"
+            p.dy = hop(2, 0.5)
+            p.eyes = .happy
+            over = { f in Draw.note(&f, 12, max(0, 4 - Int(a * 4)), "Y"); Draw.note(&f, 1, max(0, 5 - Int(a * 3)), "S") }
+        case .skip:                                                      // startled, looks around
+            p.dy = hop(2, 0.35)
+            p.eyes = .wide
+            p.lookX = Int(a * 6) % 2 == 0 ? -1 : 1
+            over = { f in f.rect(14, 1, 14, 3, "Y"); f.set(14, 5, "Y") }
+        case .pause:                                                     // sad, headphones slide off
+            p.eyes = .down
+            p.squash = 1
+            p.headphonesDrop = min(4, Int(a * 4))
+        }
     }
 }
 
@@ -262,15 +331,74 @@ private enum MascotImage {
 
 // MARK: - view
 
+/// Shared music cues: loudness from the realtime visualizer tap (when it is
+/// enabled and capturing) and one-shot track events from `MusicManager`.
+@MainActor
+final class MascotMusicCue {
+    static let shared = MascotMusicCue()
+
+    private(set) var reaction: MascotReaction?
+    private(set) var reactionAt = Date.distantPast
+    private var title = ""
+    private var playing = false
+    private var cancellables = Set<AnyCancellable>()
+
+    private init() {
+        let music = MusicManager.shared
+        title = music.songTitle
+        playing = music.isPlaying
+        music.$songTitle.removeDuplicates().dropFirst().sink { [weak self] new in
+            MainActor.assumeIsolated { self?.titleChanged(to: new) }
+        }.store(in: &cancellables)
+        music.$isPlaying.removeDuplicates().dropFirst().sink { [weak self] now in
+            MainActor.assumeIsolated { self?.playingChanged(to: now) }
+        }.store(in: &cancellables)
+    }
+
+    private func titleChanged(to new: String) {
+        defer { title = new }
+        guard !new.isEmpty, !title.isEmpty else { return }
+        // `@Published` fires before the store, so these still describe the old song.
+        let music = MusicManager.shared
+        let elapsed = music.elapsedTime + (playing ? Date().timeIntervalSince(music.timestampDate) * music.playbackRate : 0)
+        let skipped = music.songDuration > 0 && elapsed < music.songDuration - 5
+        fire(skipped ? .skip : .newTrack)
+    }
+
+    private func playingChanged(to now: Bool) {
+        playing = now
+        fire(now ? .resume : .pause)
+    }
+
+    private func fire(_ r: MascotReaction) {
+        reaction = r
+        reactionAt = Date()
+    }
+
+    /// Mean of the visualizer bars, or a gentle 120 bpm pulse without capture.
+    func level(at t: Double) -> Double {
+        let capture = AudioCaptureManager.shared
+        if capture.isCapturing, let bars = capture.latestLevelsSnapshot(), !bars.isEmpty {
+            return Double(bars.reduce(0, +)) / Double(bars.count)
+        }
+        return 0.35 + 0.35 * max(0, sin(t * 2 * .pi * 2))
+    }
+}
+
 /// Animates while it is in a visible window; `mood` is re-read every frame so
 /// time-based transitions (idle → sleep) need no extra plumbing.
+/// Hover: looks at the cursor. Click: a poke, plus play/pause when a player is
+/// around; double-click skips the track.
 final class MascotLayerView: NSView {
     var look = MascotLook(id: "") { didSet { if look != oldValue { palette = MascotImage.palette(look) } } }
     var mood: @MainActor () -> MascotMood = { .idle }
-    var headphones: @MainActor () -> Bool = { false }
 
     private lazy var palette = MascotImage.palette(look)
     private var timer: Timer?
+    private var level = 0.0                     // fast attack, slow release
+    private var pokedAt = Date.distantPast
+    private var gaze: Int?
+    private var pendingToggle: DispatchWorkItem?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -295,10 +423,56 @@ final class MascotLayerView: NSView {
         tick()
     }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds.insetBy(dx: -40, dy: -10),
+                                       options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways],
+                                       owner: self))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let x = convert(event.locationInWindow, from: nil).x
+        gaze = x < bounds.width * 0.3 ? -1 : (x > bounds.width * 0.7 ? 1 : 0)
+    }
+
+    override func mouseExited(with event: NSEvent) { gaze = nil }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        pokedAt = Date()
+        let music = MusicManager.shared
+        guard !music.isPlayerIdle else { return }
+        pendingToggle?.cancel()
+        if event.clickCount >= 2 {
+            pendingToggle = nil
+            music.nextTrack()
+            return
+        }
+        let toggle = DispatchWorkItem { MainActor.assumeIsolated { MusicManager.shared.togglePlay() } }
+        pendingToggle = toggle
+        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: toggle)
+    }
+
     private func tick() {
         guard let window, window.occlusionState.contains(.visible) else { return }
-        let t = Date().timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 100_000)
-        let frame = MascotScene.render(mood(), kind: look.kind, t: t, seed: look.seed, headphones: headphones())
+        let now = Date()
+        let t = now.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 100_000)
+        let cue = MascotMusicCue.shared
+        var m = MascotMusic(listening: MusicManager.shared.isPlaying, gaze: gaze)
+        if m.listening {
+            let target = cue.level(at: t)
+            level = target > level ? target : level * 0.85 + target * 0.15
+            m.level = level
+        }
+        let pokeAge = now.timeIntervalSince(pokedAt)
+        if pokeAge < MascotMusic.reactionLength {
+            m.reaction = .poke; m.age = pokeAge
+        } else if let r = cue.reaction {
+            m.reaction = r; m.age = now.timeIntervalSince(cue.reactionAt)
+        }
+        let frame = MascotScene.render(mood(), kind: look.kind, t: t, seed: look.seed, music: m)
         layer?.contents = MascotImage.make(frame, palette: palette)
     }
 }
@@ -306,14 +480,11 @@ final class MascotLayerView: NSView {
 struct MascotView: NSViewRepresentable {
     let look: MascotLook
     let mood: @MainActor () -> MascotMood
-    /// Defaults to "music is playing", so every mascot listens along.
-    var headphones: @MainActor () -> Bool = { MusicManager.shared.isPlaying }
 
     func makeNSView(context: Context) -> MascotLayerView { MascotLayerView(frame: .zero) }
 
     func updateNSView(_ view: MascotLayerView, context: Context) {
         view.look = look
         view.mood = mood
-        view.headphones = headphones
     }
 }
