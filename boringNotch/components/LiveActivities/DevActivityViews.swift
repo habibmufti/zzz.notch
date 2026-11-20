@@ -5,8 +5,10 @@
 
 import SwiftUI
 
-/// Closed-notch pill for ongoing dev events: a status glyph on the left,
-/// the number of ongoing events on the right.
+/// Closed-notch pill for ongoing dev events: the notch becomes a face, one
+/// eye on each side of the camera. Working: the eyes scan side to side and
+/// blink. Waiting for you: they look up, widen and turn yellow. With more
+/// than one ongoing event, the count sits beside the right eye.
 struct DevActivityLiveActivity: View {
     @EnvironmentObject private var vm: BoringViewModel
     @ObservedObject private var store = DevActivityStore.shared
@@ -14,31 +16,53 @@ struct DevActivityLiveActivity: View {
     private var itemSize: CGFloat { max(0, vm.effectiveClosedNotchHeight - 12) }
 
     var body: some View {
-        HStack {
-            Group {
-                if store.waitingCount > 0 {
-                    Image(systemName: "hand.raised.fill")
-                        .font(.system(size: itemSize * 0.55, weight: .semibold))
-                        .foregroundStyle(DevEventStatus.wait.color)
-                } else {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(DevEventStatus.run.color)
-                }
+        let waiting = store.waitingCount > 0
+        TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            HStack {
+                AgentEye(size: itemSize, waiting: waiting, time: t)
+
+                Rectangle()
+                    .fill(.black)
+                    .frame(width: vm.closedNotchSize.width - cornerRadiusInsets.closed.top)
+
+                AgentEye(size: itemSize, waiting: waiting, time: t)
+                    .overlay(alignment: .bottomTrailing) {
+                        if store.items.count > 1 {
+                            Text("\(store.items.count)")
+                                .font(.system(size: itemSize * 0.38, weight: .bold, design: .rounded))
+                                .monospacedDigit()
+                                .foregroundStyle(.white.opacity(0.7))
+                                .offset(x: itemSize * 0.15, y: itemSize * 0.1)
+                        }
+                    }
             }
-            .frame(width: itemSize, height: itemSize)
-
-            Rectangle()
-                .fill(.black)
-                .frame(width: vm.closedNotchSize.width - cornerRadiusInsets.closed.top)
-
-            Text("\(store.items.count)")
-                .font(.system(size: itemSize * 0.6, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(store.waitingCount > 0 ? DevEventStatus.wait.color : .white)
-                .frame(width: itemSize, height: itemSize)
         }
         .frame(height: vm.effectiveClosedNotchHeight)
+        .animation(.spring(duration: 0.4), value: waiting)
+    }
+}
+
+private struct AgentEye: View {
+    let size: CGFloat
+    let waiting: Bool
+    let time: TimeInterval
+
+    private static let lavender = Color(red: 0.80, green: 0.78, blue: 0.98)
+
+    var body: some View {
+        // Blink for ~0.14s every 3.7s; waiting eyes breathe instead of scanning.
+        let blinking = time.truncatingRemainder(dividingBy: 3.7) < 0.14
+        let width = size * 0.34
+        let height = size * (waiting ? 0.9 + 0.06 * sin(time * 3) : 0.72) * (blinking ? 0.15 : 1)
+        let dx = waiting ? 0 : sin(time * 1.4) * size * 0.16
+        let dy = waiting ? -size * 0.06 : 0
+
+        Capsule()
+            .fill(waiting ? DevEventStatus.wait.color : Self.lavender)
+            .frame(width: width, height: height)
+            .offset(x: dx, y: dy)
+            .frame(width: size, height: size)
     }
 }
 
