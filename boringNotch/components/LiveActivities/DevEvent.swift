@@ -33,6 +33,15 @@ enum DevEventStatus: String {
     }
 
     var isOngoing: Bool { self == .run || self == .wait || self == .idle }
+
+    var mascotMood: MascotMood {
+        switch self {
+        case .run: .working
+        case .wait: .waiting
+        case .ok: .done
+        case .info, .fail, .idle: .idle
+        }
+    }
 }
 
 /// `zzznotch://notify?title=…&body=…` with optional
@@ -146,13 +155,8 @@ final class DevActivityStore: ObservableObject {
 
     func mood(of item: SystemNotification, at now: Date) -> MascotMood {
         if let until = celebratingUntil[item.id], until > now { return .done }
-        switch item.status {
-        case .run: return .working
-        case .wait: return .waiting
-        case .ok: return .done
-        case .idle where now.timeIntervalSince(item.receivedAt) > 180: return .sleep
-        default: return .idle
-        }
+        if item.status == .idle, now.timeIntervalSince(item.receivedAt) > 180 { return .sleep }
+        return item.status?.mascotMood ?? .idle
     }
 
     private func upsert(_ event: SystemNotification) {

@@ -10,7 +10,11 @@ private struct NotificationSourceIcon: View {
     let size: CGFloat
 
     var body: some View {
-        if let symbol = notification.symbol {
+        if let status = notification.status {
+            // Dev events: the session's mascot reacts instead of a static icon.
+            MascotView(look: MascotLook(id: notification.id)) { status.mascotMood }
+                .frame(width: size, height: size)
+        } else if let symbol = notification.symbol {
             Image(systemName: symbol)
                 .font(.system(size: size * 0.55, weight: .semibold))
                 .foregroundStyle(notification.status?.color ?? .white)
@@ -35,8 +39,16 @@ struct NotificationLiveActivity: View {
     @State private var ringScale: CGFloat = 1
     @State private var ringOpacity = 0.0
 
+    /// Mascots need a 16 px multiple to stay crisp, so dev events get a
+    /// larger slot than app icons.
     private var itemSize: CGFloat {
-        max(0, vm.effectiveClosedNotchHeight - 12)
+        Self.slotSize(for: notification, notchHeight: vm.effectiveClosedNotchHeight)
+    }
+
+    static func slotSize(for notification: SystemNotification, notchHeight: CGFloat) -> CGFloat {
+        notification.status != nil
+            ? DevActivityLiveActivity.mascotSize(notchHeight: notchHeight)
+            : max(0, notchHeight - 12)
     }
 
     var body: some View {
@@ -85,7 +97,7 @@ struct NotificationExpandedView: View {
         ZStack(alignment: .topTrailing) {
             Button(action: openSourceApp) {
                 HStack(alignment: .center, spacing: 12) {
-                    NotificationSourceIcon(notification: notification, size: 46)
+                    NotificationSourceIcon(notification: notification, size: notification.status != nil ? 48 : 46)
 
                     VStack(alignment: .leading, spacing: 5) {
                         HStack(alignment: .firstTextBaseline, spacing: 6) {

@@ -124,7 +124,7 @@ private enum Draw {
 // MARK: - scenes
 
 private enum MascotScene {
-    static func render(_ mood: MascotMood, kind: MascotKind, t: Double, seed: Int) -> MascotFrame {
+    static func render(_ mood: MascotMood, kind: MascotKind, t: Double, seed: Int, headphones: Bool) -> MascotFrame {
         var f = MascotFrame()
         var p = Pose()
         var front: ((inout MascotFrame) -> Void)?
@@ -132,9 +132,14 @@ private enum MascotScene {
 
         switch mood {
         case .idle:
-            p.squash = sin(t * 2 * .pi / 3.2) > 0.75 ? 1 : 0           // slow breath
-            p.lookX = [-1, 0, 0, 1, 0][Int(hash01(Int(t / 2.2) &+ seed) * 5)]
-            p.eyes = isBlinking(t, seed: seed) ? .closed : .open
+            if headphones {                                              // vibing: nod on the beat, eyes ^ ^
+                p.squash = Int(t * 4) % 2
+                p.eyes = isBlinking(t, seed: seed) ? .closed : .happy
+            } else {
+                p.squash = sin(t * 2 * .pi / 3.2) > 0.75 ? 1 : 0       // slow breath
+                p.lookX = [-1, 0, 0, 1, 0][Int(hash01(Int(t / 2.2) &+ seed) * 5)]
+                p.eyes = isBlinking(t, seed: seed) ? .closed : .open
+            }
 
         case .working:
             let k = Int(t * 9)                                           // keystroke clock
@@ -208,6 +213,13 @@ private enum MascotScene {
         }
 
         Draw.body(&f, p, kind: kind)
+        if headphones {
+            let top = 4 + p.squash + p.dy, widen = p.squash >= 2 ? 1 : 0
+            let l = 3 - widen, r = 12 + widen
+            f.rect(l + 1, top - 1, r - 1, top - 1, "N")                   // band
+            f.rect(l - 1, top + 2, l, top + 5, "M"); f.rect(r, top + 2, r + 1, top + 5, "M")  // ear cups
+            f.rect(l - 1, top + 2, l - 1, top + 5, "N"); f.rect(r + 1, top + 2, r + 1, top + 5, "N")
+        }
         Draw.eyes(&f, p, kind: kind)
         front?(&f)
         over?(&f)
@@ -230,6 +242,7 @@ private enum MascotImage {
             "K": (26, 23, 41, 255), "W": (255, 255, 255, 255), "L": (140, 140, 140, 255),
             "S": (140, 224, 255, 255), "C": (217, 247, 255, 255), "Y": (255, 214, 64, 255),
             "P": (255, 153, 179, 255), "G": (128, 242, 140, 255),
+            "N": (58, 58, 70, 255), "M": (235, 84, 96, 255),
         ]
     }
 
@@ -253,7 +266,8 @@ private enum MascotImage {
 /// time-based transitions (idle → sleep) need no extra plumbing.
 final class MascotLayerView: NSView {
     var look = MascotLook(id: "") { didSet { if look != oldValue { palette = MascotImage.palette(look) } } }
-    var mood: () -> MascotMood = { .idle }
+    var mood: @MainActor () -> MascotMood = { .idle }
+    var headphones: @MainActor () -> Bool = { false }
 
     private lazy var palette = MascotImage.palette(look)
     private var timer: Timer?
@@ -284,19 +298,22 @@ final class MascotLayerView: NSView {
     private func tick() {
         guard let window, window.occlusionState.contains(.visible) else { return }
         let t = Date().timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 100_000)
-        let frame = MascotScene.render(mood(), kind: look.kind, t: t, seed: look.seed)
+        let frame = MascotScene.render(mood(), kind: look.kind, t: t, seed: look.seed, headphones: headphones())
         layer?.contents = MascotImage.make(frame, palette: palette)
     }
 }
 
 struct MascotView: NSViewRepresentable {
     let look: MascotLook
-    let mood: () -> MascotMood
+    let mood: @MainActor () -> MascotMood
+    /// Defaults to "music is playing", so every mascot listens along.
+    var headphones: @MainActor () -> Bool = { MusicManager.shared.isPlaying }
 
     func makeNSView(context: Context) -> MascotLayerView { MascotLayerView(frame: .zero) }
 
     func updateNSView(_ view: MascotLayerView, context: Context) {
         view.look = look
         view.mood = mood
+        view.headphones = headphones
     }
 }

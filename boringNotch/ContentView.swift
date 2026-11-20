@@ -197,8 +197,8 @@ struct ContentView: View {
             // notification is still in the stack leaves the chin at the
             // notification's width.
             switch activity {
-            case .notification:
-                chinWidth += (2 * max(0, vm.effectiveClosedNotchHeight - 12) + 20)
+            case .notification(let notification):
+                chinWidth += 2 * NotificationLiveActivity.slotSize(for: notification, notchHeight: vm.effectiveClosedNotchHeight) + 20
             case .dev:
                 chinWidth += 2 * DevActivityLiveActivity.sideWidth(count: devActivity.items.count, notchHeight: vm.effectiveClosedNotchHeight) + 4
             case .music:
