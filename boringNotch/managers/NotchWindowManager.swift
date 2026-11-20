@@ -32,10 +32,10 @@ final class NotchWindowManager {
     private var windowScreenDidChangeObserver: Any?
     private var previousScreens: [NSScreen]?
 
-    init(camera: CameraModel) {
+    init() {
         // Migrate saved heights before the initial view model reads notch sizing.
         LegacyNonNotchHeightMigration.applyIfNeeded()
-        primaryViewModel = BoringViewModel(camera: camera)
+        primaryViewModel = BoringViewModel()
     }
 
     // MARK: - Public lookups (preserve AppDelegate's old API shape)
@@ -202,7 +202,7 @@ final class NotchWindowManager {
 
                 if contexts[uuid] == nil {
                     contexts[uuid] = ScreenContext(
-                        viewModel: BoringViewModel(screenUUID: uuid, camera: primaryViewModel.camera),
+                        viewModel: BoringViewModel(screenUUID: uuid),
                         window: nil,
                         dragDetector: nil
                     )

@@ -1060,7 +1060,7 @@ struct GeneralDropTargetDelegate: DropDelegate {
 }
 
 #Preview {
-    let vm = BoringViewModel(camera: CameraModel())
+    let vm = BoringViewModel()
     vm.open()
     return ContentView()
         .environmentObject(vm)
