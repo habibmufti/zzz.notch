@@ -152,11 +152,14 @@ final class DevActivityStore: ObservableObject {
             return
         }
 
+        // Re-sends of the same state (e.g. a subagent count change) must
+        // not re-pop or re-ring.
+        let wasWaiting = items.first(where: { $0.id == event.id })?.status == .wait
         upsert(event)
         if let detail = event.subtitle, recent[event.id]?.last != detail {
             recent[event.id] = Array((recent[event.id, default: []] + [detail]).suffix(recentLimit))
         }
-        if event.status == .wait {
+        if event.status == .wait, !wasWaiting {
             var popup = event
             popup.displayDuration = nil
             playSound(for: .wait)

@@ -86,6 +86,9 @@ final class DevAskSocket: @unchecked Sendable {
         var requested = false
         var buffer: [UInt8] = []
         var timer: DispatchSourceTimer?
+        /// The client half-closed after sending its request (macOS `nc`
+        /// does on stdin EOF); reading is suspended until the reply.
+        var suspended = false
     }
 
     private let queue = DispatchQueue(label: "zzznotch.ask.socket")
@@ -188,8 +191,14 @@ final class DevAskSocket: @unchecked Sendable {
                 return
             }
             guard n > 0 else {
-                // Client closed its end: an unanswered ask is withdrawn.
-                teardown(id)
+                if connections[id]?.requested == true {
+                    // Half-close after the request: still waiting for the
+                    // answer. Stop reading; the reply or timeout ends it.
+                    connections[id]?.suspended = true
+                    connections[id]?.source.suspend()
+                } else {
+                    teardown(id)
+                }
                 return
             }
             if connections[id]?.requested == true { continue }
@@ -241,6 +250,7 @@ final class DevAskSocket: @unchecked Sendable {
     private func teardown(_ id: Int) {
         guard let conn = connections.removeValue(forKey: id) else { return }
         conn.timer?.cancel()
+        if conn.suspended { conn.source.resume() }   // a suspended source never runs its cancel handler
         conn.source.cancel()  // the cancel handler closes the descriptor
         onEvent?(.ended(client: id))
     }
