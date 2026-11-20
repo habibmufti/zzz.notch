@@ -161,7 +161,7 @@ export default function (pi: HookAPI): void {
 		if (!ctx.hasUI) return;
 		const raw = "prompt" in event ? event.prompt : "";
 		const prompt = String(raw ?? "").replace(/\s+/g, " ").trim();
-		void set(ctx.cwd, "Working", "run", prompt ? ["--prompt", prompt.slice(0, 160)] : []);
+		void set(ctx.cwd, "Working", "run", prompt ? ["--prompt", prompt.slice(0, 160)] : [], ctx);
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
