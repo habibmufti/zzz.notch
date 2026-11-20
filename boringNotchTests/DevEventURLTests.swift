@@ -38,7 +38,12 @@ final class DevEventURLTests: XCTestCase {
         XCTAssertTrue(event.id.hasPrefix("dev-"))
         XCTAssertEqual(event.appName, "zzz")
         XCTAssertEqual(event.status, .info)
-        XCTAssertEqual(event.displayDuration, 3600)
+        XCTAssertEqual(event.displayDuration, 86_400)
         XCTAssertNil(event.actionURL)
+    }
+
+    func testClearURL() throws {
+        XCTAssertEqual(DevEventURL.clearedID(from: try XCTUnwrap(URL(string: "zzznotch://clear?id=omp-1"))), "dev-omp-1")
+        XCTAssertNil(DevEventURL.clearedID(from: try XCTUnwrap(URL(string: "zzznotch://clear"))))
     }
 }

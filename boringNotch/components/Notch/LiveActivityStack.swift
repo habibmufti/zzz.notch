@@ -23,11 +23,14 @@ import SwiftUI
 enum LiveActivityItem: Identifiable, Equatable {
     case notification(SystemNotification)
     case music
+    /// Ongoing dev events (`DevActivityStore`), shown as one counting pill.
+    case dev
 
     var id: String {
         switch self {
         case .notification(let notification): "notification-\(notification.id)"
         case .music: "music"
+        case .dev: "dev"
         }
     }
 }
