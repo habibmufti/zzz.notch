@@ -52,6 +52,38 @@ struct NotificationLiveActivity: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            pill
+            // Dev events grow the pill downward with their message, so a
+            // "Done" is noticed without hovering.
+            if notification.status != nil {
+                peek
+            }
+        }
+        .onAppear { pulse() }
+        .onChange(of: notification.id) { _, _ in pulse() }
+    }
+
+    private var peek: some View {
+        HStack(spacing: 6) {
+            if let title = notification.title {
+                Text(title)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(dotColor)
+            }
+            if let body = notification.body {
+                Text(body).foregroundStyle(.white.opacity(0.85))
+            }
+        }
+        .font(.system(size: 12))
+        .lineLimit(1)
+        .truncationMode(.tail)
+        .frame(width: vm.closedNotchSize.width - cornerRadiusInsets.closed.top + 2 * itemSize + 16)
+        .padding(.bottom, 8)
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    private var pill: some View {
         HStack {
             NotificationSourceIcon(notification: notification, size: itemSize)
 
@@ -71,8 +103,6 @@ struct NotificationLiveActivity: View {
             .frame(width: itemSize, height: itemSize)
         }
         .frame(height: vm.effectiveClosedNotchHeight)
-        .onAppear { pulse() }
-        .onChange(of: notification.id) { _, _ in pulse() }
     }
 
     private var dotColor: Color {

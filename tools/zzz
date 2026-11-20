@@ -3,7 +3,7 @@
 #
 #   zzz notify "title" ["body"] [--status info|ok|fail|wait|run|idle] [--source NAME]
 #              [--symbol SF_SYMBOL] [--app BUNDLE_ID] [--url URL] [--id KEY]
-#              [--duration SECONDS]
+#              [--duration SECONDS] [--detail "current step"]
 #   zzz clear --id KEY
 #
 # run/wait/idle are ongoing states: one pixel mascot per --id in the notch
@@ -34,10 +34,10 @@ case ${1:-} in
   *) usage >&2; exit 2 ;;
 esac
 
-title= body= status= source= symbol= app= url= id= duration= npos=0
+title= body= status= source= symbol= app= url= id= duration= detail= npos=0
 while [ $# -gt 0 ]; do
   case $1 in
-    --status|--source|--symbol|--app|--url|--id|--duration)
+    --status|--source|--symbol|--app|--url|--id|--duration|--detail)
       [ $# -ge 2 ] || { echo "zzz: $1 needs a value" >&2; exit 2; }
       eval "${1#--}=\$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -59,7 +59,7 @@ else
 fi
 
 query=
-for key in title body status source symbol app url id duration; do
+for key in title body status source symbol app url id duration detail; do
   eval "value=\$$key"
   [ -n "$value" ] || continue
   query="$query${query:+&}$key=$(urlencode "$value")"

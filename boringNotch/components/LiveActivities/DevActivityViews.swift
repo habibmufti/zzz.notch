@@ -114,6 +114,13 @@ private struct DevActivityRow: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
+                    if let detail = item.subtitle {
+                        Text(detail)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                 }
                 .contentShape(Rectangle())
             }

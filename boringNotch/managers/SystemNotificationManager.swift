@@ -13,7 +13,7 @@ struct SystemNotification: Identifiable, Equatable {
     let title: String?
     let subtitle: String?
     let body: String?
-    let receivedAt: Date
+    var receivedAt: Date
     /// Set only for dev events (`zzznotch://notify`).
     var symbol: String? = nil
     var status: DevEventStatus? = nil

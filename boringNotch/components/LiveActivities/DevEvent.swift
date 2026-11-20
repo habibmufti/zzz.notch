@@ -45,6 +45,7 @@ enum DevEventStatus: String {
 }
 
 /// `zzznotch://notify?title=…&body=…` with optional
+/// `detail` (what it is doing right now, e.g. the current tool call),
 /// `source` (header label), `status` (info|ok|fail|wait|run|idle), `symbol` (SF Symbol),
 /// `app` (bundle ID for the icon), `url` (opened on click),
 /// `id` (an event reusing a live id replaces it), `duration` (seconds; popup
@@ -63,7 +64,7 @@ enum DevEventURL {
             appName: query["source"] ?? "zzz",
             bundleID: query["app"],
             title: query["title"],
-            subtitle: nil,
+            subtitle: query["detail"],
             body: query["body"],
             receivedAt: now,
             symbol: query["symbol"],
@@ -161,6 +162,9 @@ final class DevActivityStore: ObservableObject {
 
     private func upsert(_ event: SystemNotification) {
         if let index = items.firstIndex(where: { $0.id == event.id }) {
+            // Detail-only updates keep the clock of the state they belong to.
+            var event = event
+            if items[index].status == event.status { event.receivedAt = items[index].receivedAt }
             items[index] = event
         } else {
             items.append(event)
