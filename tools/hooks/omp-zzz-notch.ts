@@ -40,6 +40,25 @@ function oneLine(text: string, max: number): string {
 	return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
+/// Strip leading Nerd Font / PUA or geometric status glyphs (e.g. "⟲RECAP:").
+function cleanTitle(text: string): string {
+	return text.replace(/^[\u2022\u25A0-\u27FF\uE000-\uF8FF\uFE0F\s]+/u, "").trim() || text.trim();
+}
+
+function shortenPath(raw: string, cwd?: string): string {
+	if (!raw) return "";
+	if (cwd) {
+		const prefix = cwd.endsWith("/") ? cwd : `${cwd}/`;
+		if (raw.startsWith(prefix)) return raw.slice(prefix.length);
+	}
+	const home = process.env.HOME;
+	if (home) {
+		const prefix = home.endsWith("/") ? home : `${home}/`;
+		if (raw.startsWith(prefix)) return `~/${raw.slice(prefix.length)}`;
+	}
+	return raw;
+}
+
 /// The session title omp generated, if this omp exposes one.
 function sessionTitle(ctx: unknown): string | undefined {
 	if (!ctx || typeof ctx !== "object" || !("sessionManager" in ctx)) return undefined;
@@ -47,10 +66,11 @@ function sessionTitle(ctx: unknown): string | undefined {
 	if (!manager || typeof manager !== "object" || !("getSessionName" in manager)) return undefined;
 	const get = manager.getSessionName;
 	const name = typeof get === "function" ? get.call(manager) : undefined;
-	return typeof name === "string" && name.trim() ? oneLine(name, 60) : undefined;
+	return typeof name === "string" && name.trim() ? oneLine(cleanTitle(name), 60) : undefined;
 }
 
-/// First sentence of the agent's final reply: what got done.
+/// First sentence (or first paragraph if the first sentence is very short) of
+/// the agent's final reply: what got done.
 function finalSummary(event: unknown): string | undefined {
 	if (!event || typeof event !== "object" || !("messages" in event) || !Array.isArray(event.messages)) return undefined;
 	for (const message of [...event.messages].reverse()) {
@@ -61,8 +81,12 @@ function finalSummary(event: unknown): string | undefined {
 			: Array.isArray(content)
 				? content.map(part => (part && typeof part === "object" && "text" in part && typeof part.text === "string" ? part.text : "")).join(" ")
 				: "";
-		const first = text.trim().split(/(?<=[.!?])\s|\n/)[0] ?? "";
-		if (first.trim()) return oneLine(first, 140);
+		const trimmed = text.trim();
+		if (!trimmed) continue;
+		const paragraph = trimmed.split(/\n\s*\n/)[0] ?? trimmed;
+		const first = paragraph.split(/(?<=[.!?])\s|\n/)[0] ?? "";
+		const pick = first.trim().length < 25 ? paragraph : first;
+		if (pick.trim()) return oneLine(pick, 140);
 	}
 	return undefined;
 }
@@ -73,10 +97,11 @@ function argsOf(input: unknown): Record<string, unknown> {
 
 /// "bash: Building and installing": the tool's intent if it gave one,
 /// else its most telling argument.
-function describe(tool: string, input: unknown): string {
+function describe(tool: string, input: unknown, cwd?: string): string {
 	const args = argsOf(input);
-	const pick = ["i", "command", "path", "pattern", "query", "url"].map(k => args[k]).find(v => typeof v === "string");
-	const text = typeof pick === "string" ? pick.replace(/\s+/g, " ").trim() : "";
+	const key = ["i", "command", "path", "pattern", "query", "url"].find(k => typeof args[k] === "string");
+	const raw = key ? String(args[key]).replace(/\s+/g, " ").trim() : "";
+	const text = key === "path" ? shortenPath(raw, cwd) : raw;
 	const line = text ? `${tool}: ${text}` : tool;
 	return line.length > 120 ? `${line.slice(0, 119)}…` : line;
 }
@@ -97,9 +122,9 @@ const NOW_LABEL: Record<string, string> = {
 };
 
 /// Card lines for the current step: headline, why, and the raw target.
-function stepOf(tool: string, input: unknown): string[] {
+function stepOf(tool: string, input: unknown, cwd?: string): string[] {
 	const args = argsOf(input);
-	const str = (k: string) => (typeof args[k] === "string" ? oneLine(String(args[k]), 160) : "");
+	const str = (k: string) => (typeof args[k] === "string" ? oneLine(k === "path" ? shortenPath(String(args[k]), cwd) : String(args[k]), 160) : "");
 	const target = ["command", "path", "pattern", "query", "url", "code"].map(str).find(Boolean) ?? "";
 	const out = ["--now", NOW_LABEL[tool] ?? `Using ${tool}`];
 	if (str("i")) out.push("--intent", str("i"));
@@ -225,7 +250,7 @@ export default function (pi: HookAPI): void {
 	pi.on("tool_call", async (event, ctx) => {
 		if (!ctx.hasUI) return;
 		if (event.toolName !== "ask") {
-			pending = ["--detail", describe(event.toolName, event.input), "--activity", activityOf(event.toolName, event.input), ...stepOf(event.toolName, event.input)];
+			pending = ["--detail", describe(event.toolName, event.input, ctx.cwd), "--activity", activityOf(event.toolName, event.input), ...stepOf(event.toolName, event.input, ctx.cwd)];
 			if (event.toolName === "task") {
 				const list = agentListOf(event.input);
 				if (list) void send(["--agent-list", list]);

@@ -74,24 +74,42 @@ private func mascotActivity(of item: SystemNotification) -> MascotActivity {
     MascotActivity(rawValue: item.activity ?? "") ?? .type
 }
 
-/// Open-notch Dev tab: every ongoing event; click opens its source.
-/// Verbose: the session that most needs you gets a card, the rest one line each.
+private struct DevContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// Open-notch Dev tab: every ongoing event; click selects a session card,
+/// clicking the card header or a row's arrow opens its source app.
 struct DevActivityListView: View {
     @ObservedObject private var store = DevActivityStore.shared
     @Default(.devVerboseCard) private var verboseCard
+    @State private var selectedID: String?
+    @State private var contentHeight: CGFloat = 160
+
+    private var maxScrollHeight: CGFloat { max(140, devTabNotchHeight - 58) }
 
     var body: some View {
         let items = store.sortedItems
+        let active = selectedID.flatMap { id in items.first(where: { $0.id == id }) } ?? items.first
+        let others = active.map { current in items.filter { $0.id != current.id } } ?? []
+
         ScrollView(.vertical, showsIndicators: false) {
             Group {
-                if verboseCard, let first = items.first {
+                if verboseCard, let current = active {
                     VStack(alignment: .leading, spacing: 10) {
-                        DevSessionCard(item: first)
-                        if items.count > 1 {
-                            DevSectionHeader("OTHER SESSIONS · CLICK TO OPEN")
+                        DevSessionCard(item: current)
+                        if !others.isEmpty {
+                            DevSectionHeader("OTHER SESSIONS · \(others.count)")
                             VStack(spacing: 4) {
-                                ForEach(items.dropFirst()) { item in
-                                    DevCompactRow(item: item)
+                                ForEach(others) { item in
+                                    DevCompactRow(item: item) {
+                                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                                            selectedID = item.id
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -105,9 +123,28 @@ struct DevActivityListView: View {
                 }
             }
             .padding(.horizontal, 6)
+            .padding(.bottom, 4)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(key: DevContentHeightKey.self, value: proxy.size.height)
+                }
+            )
             .animation(.spring(response: 0.4, dampingFraction: 0.85), value: items.map(\.id))
+            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: active?.id)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity, height: min(max(contentHeight, 96), maxScrollHeight), alignment: .top)
+        .onPreferenceChange(DevContentHeightKey.self) { height in
+            if height > 0 { contentHeight = height }
+        }
+        // A session asking for input jumps back to the front card automatically.
+        .onChange(of: items.first(where: { $0.status == .wait })?.id) { _, waitingID in
+            if let waitingID { selectedID = waitingID }
+        }
+        .onChange(of: items.map(\.id)) { _, ids in
+            if let current = selectedID, !ids.contains(current) {
+                selectedID = nil
+            }
+        }
     }
 }
 
@@ -134,7 +171,7 @@ private struct DevActivityRow: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
-                            Text(item.title ?? item.appName ?? "zzz")
+                            Text(DevText.cleanTitle(item.title ?? item.appName ?? "zzz"))
                                 .font(.system(size: 13, weight: .semibold))
                                 .lineLimit(1)
                             if let source = item.appName, source != item.title {
@@ -251,11 +288,12 @@ private struct DevCardSection<Content: View>: View {
     }
 }
 
-/// Detailed card for the session that most needs you (verbose Dev tab).
+/// Detailed card for the active session (verbose Dev tab).
 private struct DevSessionCard: View {
     @ObservedObject private var store = DevActivityStore.shared
     @ObservedObject private var askCenter = DevAskCenter.shared
     let item: SystemNotification
+    @State private var hoveringHeader = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -299,17 +337,30 @@ private struct DevSessionCard: View {
             }
             if let lines = store.recent[item.id], !lines.isEmpty {
                 DevCardSection("BEFORE THAT") {
-                    ForEach(Array(lines.suffix(5).reversed().enumerated()), id: \.offset) { _, line in
-                        HStack(spacing: 6) {
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 8, weight: .semibold))
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 14)
-                            Text(line)
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(lines.suffix(5).reversed().enumerated()), id: \.offset) { _, line in
+                            let parsed = DevText.parseStep(line)
+                            HStack(spacing: 6) {
+                                if let tool = parsed.tool {
+                                    Text(tool)
+                                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(.white.opacity(0.65))
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 1)
+                                        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
+                                        .fixedSize()
+                                } else {
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 8, weight: .semibold))
+                                        .foregroundStyle(.tertiary)
+                                        .frame(width: 14)
+                                }
+                                Text(parsed.text)
+                                    .font(.system(size: 10.5, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
                         }
                     }
                 }
@@ -321,7 +372,11 @@ private struct DevSessionCard: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
+        let displayTitle = DevText.cleanTitle(item.title ?? item.appName ?? "zzz")
+        let mood = store.mood(of: item, at: Date())
+        let status = effectiveStatus(mood: mood)
+
+        return HStack(spacing: 10) {
             MascotView(
                 look: MascotLook(id: item.id),
                 mood: { store.mood(of: item, at: Date()) },
@@ -334,24 +389,52 @@ private struct DevSessionCard: View {
                 Task { _ = await SystemNotificationManager.shared.open(item) }
             } label: {
                 HStack(spacing: 6) {
-                    Text(item.title ?? item.appName ?? "zzz")
+                    Text(displayTitle)
                         .font(.system(size: 13, weight: .bold))
                         .lineLimit(1)
-                    if let source = item.appName, source != item.title {
+                    if let source = item.appName, source != displayTitle, source != item.title {
                         Text(source)
                             .font(.system(size: 11))
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
+                            .fixedSize()
                     }
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(status.color)
+                            .frame(width: 5, height: 5)
+                        Text(status.label)
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(status.color)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(status.color.opacity(0.14), in: Capsule())
+                    .fixedSize()
+
                     Spacer(minLength: 4)
+
+                    if hoveringHeader {
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
                     Text(item.receivedAt, style: .relative)
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                         .fixedSize()
                 }
+                .padding(.vertical, 2)
+                .padding(.horizontal, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(.white.opacity(hoveringHeader ? 0.08 : 0))
+                )
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .onHover { hoveringHeader = $0 }
+            .help("Open source app")
 
             Button {
                 store.remove(item.id)
@@ -365,6 +448,13 @@ private struct DevSessionCard: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Dismiss")
         }
+    }
+
+    private func effectiveStatus(mood: MascotMood) -> (label: String, color: Color) {
+        if mood == .done { return ("Done", DevEventStatus.ok.color) }
+        if mood == .sleep { return ("Sleeping", DevEventStatus.idle.color) }
+        let st = item.status ?? .info
+        return (st.label, st.color)
     }
 
     private var nowSection: some View {
@@ -388,7 +478,7 @@ private struct DevSessionCard: View {
                             .lineLimit(2)
                     }
                     if let command = item.command {
-                        Text(command)
+                        Text(DevText.shortenPaths(in: command))
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
@@ -404,7 +494,7 @@ private struct DevSessionCard: View {
             if let body = item.body {
                 Text(body)
                     .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.primary.opacity(0.9))
                     .lineLimit(3)
             }
             if let ask = askCenter.pending[item.id] {
@@ -417,11 +507,24 @@ private struct DevSessionCard: View {
     private var resultSection: some View {
         // "Idle"/"Working" are placeholders, not results.
         if let body = item.body, !["Idle", "Working", "Done"].contains(body) {
+            let accent: Color = item.status == .fail ? DevEventStatus.fail.color : DevEventStatus.ok.color
             DevCardSection("LAST RESULT") {
                 Text(body)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.primary.opacity(0.92))
                     .lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 14)
+                    .padding(.trailing, 8)
+                    .padding(.vertical, 6)
+                    .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(accent.opacity(0.85))
+                            .frame(width: 2.5)
+                            .padding(.vertical, 5)
+                            .padding(.leading, 6)
+                    }
             }
         }
     }
@@ -446,43 +549,61 @@ private struct DevSessionCard: View {
     }
 }
 
-/// One line for a session other than the card's; tap opens its source.
+/// One line for a session other than the card's: clicking inspects it in the
+/// card; the trailing arrow jumps straight to its source app.
 private struct DevCompactRow: View {
     let item: SystemNotification
+    let onSelect: () -> Void
+    @State private var hovering = false
+    @State private var hoveringOpen = false
 
     var body: some View {
-        let title = item.title ?? item.appName ?? "zzz"
-        let source = item.appName == title ? nil : item.appName
-        let detail = [source, item.now ?? item.subtitle]
+        let title = DevText.cleanTitle(item.title ?? item.appName ?? "zzz")
+        let source = (item.appName == title || item.appName == item.title) ? nil : item.appName
+        let detail = [source, item.status == .run ? (item.now ?? item.subtitle) : nil]
             .compactMap { $0 }
             .joined(separator: " · ")
-        Button {
-            Task { _ = await SystemNotificationManager.shared.open(item) }
-        } label: {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill((item.status ?? .info).color)
-                    .frame(width: 7, height: 7)
-                Text(title)
-                    .font(.system(size: 12, weight: .bold))
-                    .lineLimit(1)
-                if !detail.isEmpty {
-                    Text(detail)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+
+        HStack(spacing: 8) {
+            Button(action: onSelect) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill((item.status ?? .info).color)
+                        .frame(width: 7, height: 7)
+                    Text(title)
+                        .font(.system(size: 12, weight: .bold))
                         .lineLimit(1)
+                    if !detail.isEmpty {
+                        Text(detail)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
                 }
-                Spacer(minLength: 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                Task { _ = await SystemNotificationManager.shared.open(item) }
+            } label: {
                 Image(systemName: "arrow.up.right")
                     .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(hoveringOpen ? .primary : .tertiary)
+                    .frame(width: 22, height: 22)
+                    .background(.white.opacity(hoveringOpen ? 0.14 : 0), in: RoundedRectangle(cornerRadius: 5))
+                    .contentShape(Rectangle())
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
-            .contentShape(RoundedRectangle(cornerRadius: 8))
+            .buttonStyle(.plain)
+            .onHover { hoveringOpen = $0 }
+            .help("Open source app")
         }
-        .buttonStyle(.plain)
+        .padding(.leading, 10)
+        .padding(.trailing, 6)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(hovering ? 0.11 : 0.06), in: RoundedRectangle(cornerRadius: 8))
+        .onHover { hovering = $0 }
     }
 }

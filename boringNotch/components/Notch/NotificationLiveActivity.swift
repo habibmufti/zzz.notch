@@ -65,21 +65,40 @@ struct NotificationLiveActivity: View {
     }
 
     private var peek: some View {
-        HStack(spacing: 6) {
-            if let title = notification.title {
-                Text(title)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(dotColor)
+        let title = notification.title.map(DevText.cleanTitle)
+        let source = notification.appName.flatMap { $0 == title ? nil : $0 }
+        let bodyText = notification.body
+
+        return VStack(alignment: .leading, spacing: 2) {
+            if let title {
+                HStack(spacing: 5) {
+                    Text(title)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(dotColor)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if let source {
+                        Text(source)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white.opacity(0.45))
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    Spacer(minLength: 0)
+                }
             }
-            if let body = notification.body {
-                Text(body).foregroundStyle(.white.opacity(0.85))
+            if let bodyText {
+                Text(bodyText)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .font(.system(size: 12))
-        .lineLimit(1)
-        .truncationMode(.tail)
-        .frame(width: vm.closedNotchSize.width - cornerRadiusInsets.closed.top + 2 * itemSize + 16)
+        .padding(.horizontal, 12)
         .padding(.bottom, 8)
+        .frame(width: vm.closedNotchSize.width - cornerRadiusInsets.closed.top + 2 * itemSize + 16)
         .transition(.opacity.combined(with: .move(edge: .top)))
     }
 
@@ -155,7 +174,7 @@ struct NotificationExpandedView: View {
                                 .fixedSize()
                         }
 
-                        if let title = notification.title, title != notification.appName {
+                        if let title = notification.title.map(DevText.cleanTitle), title != notification.appName {
                             Text(title)
                                 .font(.system(size: 12, weight: .medium))
                                 .lineLimit(1)

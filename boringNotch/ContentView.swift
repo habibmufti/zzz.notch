@@ -138,9 +138,9 @@ struct ContentView: View {
     private var openNotchHeight: CGFloat? {
         if notificationManager.activeNotification != nil { return 132 }
         if Defaults[.compactMode] { return nil }
-        // The Dev tab holds a session card, not a tile row: give it room
-        // (other notch session apps open 320–580pt tall for the same job).
-        if coordinator.currentView == .dev && !devActivity.items.isEmpty { return devTabNotchHeight }
+        // The Dev tab sizes to its content up to `devTabNotchHeight` so a
+        // short card doesn't leave an empty black box below it.
+        if coordinator.currentView == .dev && !devActivity.items.isEmpty { return nil }
         return vm.notchSize.height
     }
 

@@ -43,6 +43,77 @@ enum DevEventStatus: String {
         case .info, .fail, .idle: .idle
         }
     }
+
+    var label: String {
+        switch self {
+        case .run: "Running"
+        case .wait: "Waiting"
+        case .ok: "Done"
+        case .fail: "Failed"
+        case .idle: "Idle"
+        case .info: "Info"
+        }
+    }
+}
+
+/// Text cleanup shared by the closed-notch peek and the Dev tab card.
+enum DevText {
+    /// Strips leading Nerd Font / PUA glyphs and stray status symbols (e.g. "⟲RECAP:")
+    /// that some agent session titles prepend.
+    static func cleanTitle(_ raw: String) -> String {
+        var scalars = Substring(raw).unicodeScalars
+        while let first = scalars.first, isDecorativePrefix(first) {
+            scalars.removeFirst()
+        }
+        let cleaned = String(scalars).trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? raw : cleaned
+    }
+
+    /// Splits a raw action line like `"edit: /private/tmp/wt/docs/a.md"` into an
+    /// optional tool tag and a shortened argument string.
+    static func parseStep(_ raw: String) -> (tool: String?, text: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let colon = trimmed.firstIndex(of: ":") else {
+            return (nil, shortenPaths(in: trimmed))
+        }
+        let prefix = String(trimmed[..<colon])
+        let after = trimmed.index(after: colon)
+        let validTool = !prefix.isEmpty
+            && prefix.count <= 16
+            && prefix.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+        guard validTool, after < trimmed.endIndex, trimmed[after] == " " else {
+            return (nil, shortenPaths(in: trimmed))
+        }
+        let rest = trimmed[after...].trimmingCharacters(in: .whitespaces)
+        return (prefix, shortenPaths(in: rest))
+    }
+
+    /// Compacts absolute macOS paths (`/Users/name/...` -> `~/...`, deep temp/worktree
+    /// paths -> `…/last/three/parts`) so history rows stay readable.
+    static func shortenPaths(in text: String) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var result = text
+        if !home.isEmpty {
+            result = result.replacingOccurrences(of: home + "/", with: "~/")
+        }
+        // Only compact single-path arguments (not compound shell commands).
+        guard result.hasPrefix("/"), !result.contains(" ") else { return result }
+        let parts = result.split(separator: "/", omittingEmptySubsequences: true)
+        guard parts.count > 4 else { return result }
+        return "…/" + parts.suffix(3).joined(separator: "/")
+    }
+
+    private static func isDecorativePrefix(_ scalar: UnicodeScalar) -> Bool {
+        let v = scalar.value
+        if (0xE000...0xF8FF).contains(v) || (0xF0000...0xFFFFD).contains(v) || (0x100000...0x10FFFD).contains(v) {
+            return true
+        }
+        // Common geometric / arrow / clock status glyphs (e.g. ⟲ ↻ ⟳ ● •).
+        if (0x25A0...0x27FF).contains(v) || v == 0x2022 || v == 0xFE0F {
+            return true
+        }
+        return scalar.properties.isWhitespace
+    }
 }
 
 /// `zzznotch://notify?title=…&body=…` with optional

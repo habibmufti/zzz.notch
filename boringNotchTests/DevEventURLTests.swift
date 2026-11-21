@@ -46,4 +46,20 @@ final class DevEventURLTests: XCTestCase {
         XCTAssertEqual(DevEventURL.clearedID(from: try XCTUnwrap(URL(string: "zzznotch://clear?id=omp-1"))), "dev-omp-1")
         XCTAssertNil(DevEventURL.clearedID(from: try XCTUnwrap(URL(string: "zzznotch://clear"))))
     }
+
+    func testCleanTitleStripsDecorativePrefixes() {
+        XCTAssertEqual(DevText.cleanTitle("⟲RECAP: Recap yesterday's cashier progress"), "RECAP: Recap yesterday's cashier progress")
+        XCTAssertEqual(DevText.cleanTitle("\u{E0B0} zzz.notch"), "zzz.notch")
+        XCTAssertEqual(DevText.cleanTitle("plain title"), "plain title")
+    }
+
+    func testParseStepSeparatesToolAndShortensDeepPath() {
+        let parsed = DevText.parseStep("edit: /private/tmp/wt-audit/docs/qa/2026-11-22-audit.md")
+        XCTAssertEqual(parsed.tool, "edit")
+        XCTAssertEqual(parsed.text, "…/docs/qa/2026-11-22-audit.md")
+
+        let plain = DevText.parseStep("running tests")
+        XCTAssertNil(plain.tool)
+        XCTAssertEqual(plain.text, "running tests")
+    }
 }
