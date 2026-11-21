@@ -196,26 +196,60 @@ function questionOf(input: unknown): NotchQuestion | undefined {
 	};
 }
 
+function actionURLFor(cwd: string): string | undefined {
+	const bundle = process.env.__CFBundleIdentifier ?? "";
+	const term = process.env.TERM_PROGRAM ?? "";
+	if (bundle === "com.microsoft.VSCode" || term === "vscode") {
+		return `vscode://file${encodeURI(cwd)}`;
+	}
+	if (bundle === "com.todesktop.230313mzl4w4u92") {
+		return `cursor://file${encodeURI(cwd)}`;
+	}
+	return undefined;
+}
+
+function contextPercentOf(ctx: unknown): number | undefined {
+	if (!ctx || typeof ctx !== "object" || !("getContextUsage" in ctx)) return undefined;
+	const fn = (ctx as { getContextUsage?: unknown }).getContextUsage;
+	if (typeof fn !== "function") return undefined;
+	const usage = fn.call(ctx);
+	if (!usage || typeof usage !== "object") return undefined;
+	const u = usage as Record<string, unknown>;
+	if (typeof u.percent === "number" && Number.isFinite(u.percent)) {
+		return Math.min(100, Math.max(0, Math.round(u.percent)));
+	}
+	if (typeof u.tokens === "number" && typeof u.contextWindow === "number" && u.contextWindow > 0) {
+		return Math.min(100, Math.max(0, Math.round((u.tokens * 100) / u.contextWindow)));
+	}
+	return undefined;
+}
+
 export default function (pi: HookAPI): void {
 	const zzz = (args: string[]) => pi.exec(ZZZ, args).catch(() => undefined);
-	const send = (extra: string[] = []) =>
-		shared.cwd
-			? zzz([
-					// The session's own title says what it is about; the
-					// project moves to the small label next to it.
-					"notify", shared.title ?? path.basename(shared.cwd), shared.body,
-					"--source", shared.title ? path.basename(shared.cwd) : "omp", "--status", shared.status, "--symbol", "sparkles",
-					"--app", process.env.__CFBundleIdentifier ?? "",
-					"--id", id, "--agents", String(shared.agents),
-					...extra,
-				])
-			: Promise.resolve(undefined);
+	const send = (extra: string[] = [], ctx?: unknown) => {
+		if (!shared.cwd) return Promise.resolve(undefined);
+		const url = actionURLFor(shared.cwd);
+		const tmux = process.env.TMUX_PANE?.trim();
+		const pct = contextPercentOf(ctx);
+		return zzz([
+			// The session's own title says what it is about; the
+			// project moves to the small label next to it.
+			"notify", shared.title ?? path.basename(shared.cwd), shared.body,
+			"--source", shared.title ? path.basename(shared.cwd) : "omp", "--status", shared.status, "--symbol", "sparkles",
+			"--app", process.env.__CFBundleIdentifier ?? "",
+			"--id", id, "--pid", String(process.pid), "--agents", String(shared.agents),
+			...(url ? ["--url", url] : []),
+			...(tmux ? ["--tmux", tmux] : []),
+			...(pct !== undefined ? ["--context", String(pct)] : []),
+			...extra,
+		]);
+	};
 	const set = (cwd: string, body: string, status: Status, extra: string[] = [], ctx?: unknown) => {
 		shared.cwd = cwd;
 		shared.title = sessionTitle(ctx) ?? shared.title;
 		shared.body = body;
 		shared.status = status;
-		return send(extra);
+		return send(extra, ctx);
 	};
 
 	let pending: string[] | undefined;

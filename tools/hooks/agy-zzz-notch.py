@@ -16,6 +16,7 @@ import shlex
 import subprocess
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +94,106 @@ def detect_app_bundle(payload: dict[str, Any]) -> str:
     return ""
 
 
+def detect_action_url(root: str, app_bundle: str) -> str:
+    if not root:
+        return ""
+    term = os.environ.get("TERM_PROGRAM", "").strip()
+    if app_bundle == "com.microsoft.VSCode" or term == "vscode":
+        return "vscode://file" + urllib.parse.quote(root, safe="/")
+    if app_bundle == "com.todesktop.230313mzl4w4u92":
+        return "cursor://file" + urllib.parse.quote(root, safe="/")
+    return ""
+
+
+def detect_host_pid() -> int | None:
+    """Walk past transient sh/bash/zsh hook wrappers to find the persistent host PID."""
+    pid = os.getppid()
+    for _ in range(5):
+        if pid <= 1:
+            return None
+        try:
+            out = subprocess.check_output(
+                ["/bin/ps", "-o", "ppid=,comm=", "-p", str(pid)],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=0.3,
+            ).strip()
+        except Exception:
+            return pid
+        parts = out.split(None, 1)
+        if len(parts) < 2:
+            return pid
+        ppid_str, comm = parts[0], os.path.basename(parts[1].strip())
+        if comm in ("sh", "bash", "zsh", "dash", "env"):
+            try:
+                pid = int(ppid_str)
+                continue
+            except ValueError:
+                return pid
+        return pid
+    return pid if pid > 1 else None
+
+
+def context_window_for(model: str) -> int:
+    m = model.lower()
+    if "gemini" in m or "[1m]" in m:
+        return 1_000_000
+    return 200_000
+
+
+def transcript_metrics(transcript_path: str) -> tuple[str | None, int | None]:
+    """Read tail of transcript.jsonl once to get (final_summary, context_percent)."""
+    if not transcript_path:
+        return None, None
+    p = Path(transcript_path)
+    if not p.is_file():
+        return None, None
+    try:
+        size = p.stat().st_size
+        with p.open("rb") as f:
+            if size > 65536:
+                f.seek(size - 65536)
+                f.readline()  # discard partial line
+            lines = f.read().decode("utf-8", errors="ignore").splitlines()
+    except Exception:
+        return None, None
+
+    summary: str | None = None
+    context_pct: int | None = None
+
+    for raw in reversed(lines):
+        if not raw.strip():
+            continue
+        try:
+            entry = json.loads(raw)
+        except Exception:
+            continue
+        if entry.get("type") != "PLANNER_RESPONSE" or entry.get("source") != "MODEL":
+            continue
+        if context_pct is None:
+            try:
+                inp = int(entry.get("input_tokens") or 0)
+                cached = int(entry.get("cache_read_tokens") or 0)
+                total = inp + cached
+                if total > 0:
+                    window = context_window_for(str(entry.get("model") or ""))
+                    context_pct = min(100, max(1, round(total * 100 / window)))
+            except Exception:
+                pass
+        if summary is None:
+            content = entry.get("content")
+            if isinstance(content, str) and content.strip():
+                paragraph = re.split(r"\n\s*\n", content.strip(), maxsplit=1)[0].strip()
+                first = SENTENCE_SPLIT_RE.split(paragraph, maxsplit=1)[0].strip()
+                pick = paragraph if len(first) < 25 else first
+                if pick:
+                    summary = one_line(pick, 140)
+        if summary is not None and context_pct is not None:
+            break
+
+    return summary, context_pct
+
+
 def workspace_root(payload: dict[str, Any]) -> str:
     paths = payload.get("workspacePaths")
     if isinstance(paths, list) and paths and isinstance(paths[0], str) and paths[0]:
@@ -121,42 +222,6 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
         path.write_text(json.dumps(state), encoding="utf-8")
     except Exception:
         pass
-
-
-def final_summary(transcript_path: str) -> str | None:
-    if not transcript_path:
-        return None
-    p = Path(transcript_path)
-    if not p.is_file():
-        return None
-    try:
-        size = p.stat().st_size
-        with p.open("rb") as f:
-            if size > 65536:
-                f.seek(size - 65536)
-                f.readline()  # discard partial line
-            lines = f.read().decode("utf-8", errors="ignore").splitlines()
-    except Exception:
-        return None
-
-    for raw in reversed(lines):
-        if not raw.strip():
-            continue
-        try:
-            entry = json.loads(raw)
-        except Exception:
-            continue
-        if entry.get("type") != "PLANNER_RESPONSE" or entry.get("source") != "MODEL":
-            continue
-        content = entry.get("content")
-        if not isinstance(content, str) or not content.strip():
-            continue
-        paragraph = re.split(r"\n\s*\n", content.strip(), maxsplit=1)[0].strip()
-        first = SENTENCE_SPLIT_RE.split(paragraph, maxsplit=1)[0].strip()
-        pick = paragraph if len(first) < 25 else first
-        if pick:
-            return one_line(pick, 140)
-    return None
 
 
 def activity_of(tool: str, args: dict[str, Any]) -> str:
@@ -216,6 +281,9 @@ def build_notify_args(
     status: str,
     session_id: str,
     app_bundle: str,
+    action_url: str = "",
+    host_pid: int | None = None,
+    context_pct: int | None = None,
     extra: list[str] | None = None,
 ) -> list[str]:
     args = [
@@ -234,6 +302,15 @@ def build_notify_args(
     ]
     if app_bundle:
         args.extend(["--app", app_bundle])
+    if action_url:
+        args.extend(["--url", action_url])
+    if host_pid:
+        args.extend(["--pid", str(host_pid)])
+    if context_pct is not None:
+        args.extend(["--context", str(context_pct)])
+    tmux_pane = os.environ.get("TMUX_PANE", "").strip()
+    if tmux_pane:
+        args.extend(["--tmux", tmux_pane])
     if extra:
         args.extend(extra)
     return args
@@ -284,18 +361,37 @@ def handle_event(payload: dict[str, Any]) -> None:
     root = workspace_root(payload)
     project = os.path.basename(root.rstrip("/")) if root else "Antigravity"
     app_bundle = detect_app_bundle(payload)
+    action_url = detect_action_url(root, app_bundle)
+    transcript = str(payload.get("transcriptPath") or "")
 
     st_path = state_file_path(session_id)
     state = load_state(st_path)
     now_ts = time.monotonic()
 
+    host_pid: int | None = state.get("pid") if isinstance(state.get("pid"), int) else detect_host_pid()
+    if host_pid:
+        state["pid"] = host_pid
+
     prompt_raw = payload.get("lastUserInput")
     prompt = one_line(prompt_raw, 160) if isinstance(prompt_raw, str) and prompt_raw.strip() else state.get("prompt", "")
+
+    def make(body: str, status: str, context_pct: int | None = None, extra: list[str] | None = None) -> list[str]:
+        return build_notify_args(
+            project,
+            body,
+            status,
+            session_id,
+            app_bundle,
+            action_url=action_url,
+            host_pid=host_pid,
+            context_pct=context_pct,
+            extra=extra,
+        )
 
     if event == "SessionStart":
         state.update({"status": "idle", "last_ts": now_ts, "prompt": prompt})
         save_state(st_path, state)
-        fire_async(build_notify_args(project, "Idle", "idle", session_id, app_bundle))
+        fire_async(make("Idle", "idle"))
         return
 
     if event == "PreInvocation":
@@ -303,10 +399,11 @@ def handle_event(payload: dict[str, Any]) -> None:
         prev_prompt = state.get("prompt", "")
         if prev_status == "run" and prev_prompt == prompt and (now_ts - float(state.get("last_ts", 0))) < DETAIL_INTERVAL_S:
             return
+        _, ctx_pct = transcript_metrics(transcript)
         state.update({"status": "run", "last_ts": now_ts, "prompt": prompt})
         save_state(st_path, state)
         extra = ["--prompt", prompt] if prompt else []
-        fire_async(build_notify_args(project, "Working", "run", session_id, app_bundle, extra))
+        fire_async(make("Working", "run", context_pct=ctx_pct, extra=extra))
         return
 
     if event == "PreToolUse":
@@ -324,7 +421,7 @@ def handle_event(payload: dict[str, Any]) -> None:
             state.update({"status": "wait", "last_ts": now_ts, "prompt": prompt})
             save_state(st_path, state)
             extra = ["--prompt", prompt] if prompt else []
-            fire_async(build_notify_args(project, q_text, "wait", session_id, app_bundle, extra))
+            fire_async(make(q_text, "wait", extra=extra))
             return
 
         if state.get("status") == "run" and (now_ts - float(state.get("last_ts", 0))) < DETAIL_INTERVAL_S:
@@ -342,7 +439,7 @@ def handle_event(payload: dict[str, Any]) -> None:
 
         state.update({"status": "run", "last_ts": now_ts, "prompt": prompt})
         save_state(st_path, state)
-        fire_async(build_notify_args(project, "Working", "run", session_id, app_bundle, extra))
+        fire_async(make("Working", "run", extra=extra))
         return
 
     if event == "PostToolUse":
@@ -351,13 +448,13 @@ def handle_event(payload: dict[str, Any]) -> None:
             state.update({"status": "run", "last_ts": now_ts, "prompt": prompt})
             save_state(st_path, state)
             extra = ["--prompt", prompt] if prompt else []
-            fire_async(build_notify_args(project, "Working", "run", session_id, app_bundle, extra))
+            fire_async(make("Working", "run", extra=extra))
         return
 
     if event == "Stop":
         reason = str(payload.get("terminationReason") or "")
         error = str(payload.get("error") or "").strip()
-        transcript = str(payload.get("transcriptPath") or "")
+        summary_text, ctx_pct = transcript_metrics(transcript)
 
         state.update({"status": "idle", "last_ts": now_ts, "prompt": prompt})
         save_state(st_path, state)
@@ -366,16 +463,16 @@ def handle_event(payload: dict[str, Any]) -> None:
         if reason == "ERROR" or error:
             msg = one_line(error or "Execution error", 140)
             fire_sequence_async(
-                build_notify_args(project, msg, "fail", session_id, app_bundle, extra),
-                build_notify_args(project, msg, "idle", session_id, app_bundle, extra),
+                make(msg, "fail", context_pct=ctx_pct, extra=extra),
+                make(msg, "idle", context_pct=ctx_pct, extra=extra),
             )
         elif reason == "USER_CANCELED":
-            fire_async(build_notify_args(project, "Canceled", "idle", session_id, app_bundle, extra))
+            fire_async(make("Canceled", "idle", context_pct=ctx_pct, extra=extra))
         else:
-            summary = final_summary(transcript) or "Done"
+            summary = summary_text or "Done"
             fire_sequence_async(
-                build_notify_args(project, summary, "ok", session_id, app_bundle, extra),
-                build_notify_args(project, summary, "idle", session_id, app_bundle, extra),
+                make(summary, "ok", context_pct=ctx_pct, extra=extra),
+                make(summary, "idle", context_pct=ctx_pct, extra=extra),
             )
 
 

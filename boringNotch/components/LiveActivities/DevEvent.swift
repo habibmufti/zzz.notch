@@ -16,6 +16,7 @@
 //
 
 import AppKit
+import Darwin
 import Defaults
 import SwiftUI
 
@@ -156,7 +157,10 @@ enum DevEventURL {
             intent: query["intent"],
             command: query["command"],
             step: query["step"],
-            agentList: query["agentList"]
+            agentList: query["agentList"],
+            pid: query["pid"].flatMap(Int32.init).flatMap { $0 > 0 ? $0 : nil },
+            contextPercent: query["context"].flatMap(Int.init).map { min(max($0, 0), 100) },
+            tmuxPane: query["tmux"]
         )
     }
 
@@ -206,6 +210,7 @@ final class DevActivityStore: ObservableObject {
     private let sleepAfter: TimeInterval = 180
     private let recentLimit = 5
     private var expiry: [String: Task<Void, Never>] = [:]
+    private var pidWatcher: Task<Void, Never>?
 
     func handle(_ url: URL) {
         if let id = DevEventURL.clearedID(from: url) {
@@ -256,6 +261,7 @@ final class DevActivityStore: ObservableObject {
         recent[id] = nil
         if selectedID == id { selectedID = nil }
         items.removeAll { $0.id == id }
+        syncPidWatcher()
     }
 
     func mood(of item: SystemNotification, at now: Date) -> MascotMood {
@@ -309,6 +315,10 @@ final class DevActivityStore: ObservableObject {
             if items[index].status == event.status { event.receivedAt = items[index].receivedAt }
             if event.prompt == nil { event.prompt = items[index].prompt }
             if event.step == nil { event.step = items[index].step }
+            if event.pid == nil { event.pid = items[index].pid }
+            if event.contextPercent == nil { event.contextPercent = items[index].contextPercent }
+            if event.tmuxPane == nil { event.tmuxPane = items[index].tmuxPane }
+            if event.actionURL == nil { event.actionURL = items[index].actionURL }
             // `agents=0` says no subagents are left; otherwise a missing list carries over.
             if event.agents == 0 {
                 event.agentList = nil
@@ -326,6 +336,33 @@ final class DevActivityStore: ObservableObject {
             try? await Task.sleep(for: .seconds(lifetime))
             guard !Task.isCancelled else { return }
             self?.remove(event.id)
+        }
+        syncPidWatcher()
+    }
+
+    private func syncPidWatcher() {
+        let hasPids = items.contains { $0.pid != nil }
+        guard hasPids else {
+            pidWatcher?.cancel()
+            pidWatcher = nil
+            return
+        }
+        guard pidWatcher == nil else { return }
+        pidWatcher = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                guard !Task.isCancelled, let self else { return }
+                let deadIDs = self.items.compactMap { item -> String? in
+                    guard let pid = item.pid else { return nil }
+                    if Darwin.kill(pid, 0) != 0 && errno == ESRCH {
+                        return item.id
+                    }
+                    return nil
+                }
+                for id in deadIDs {
+                    self.remove(id)
+                }
+            }
         }
     }
 }

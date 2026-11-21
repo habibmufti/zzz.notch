@@ -32,6 +32,12 @@ struct SystemNotification: Identifiable, Equatable {
     var step: String? = nil
     /// Running subagents, one per line as "name · task".
     var agentList: String? = nil
+    /// Owning process id; when it exits, the ongoing dev session auto-clears.
+    var pid: Int32? = nil
+    /// Context window utilization (0...100), shown as a subtle bar in the Dev card.
+    var contextPercent: Int? = nil
+    /// Optional tmux pane target (e.g. "%3") focused before activating the terminal app.
+    var tmuxPane: String? = nil
 }
 
 @MainActor
@@ -115,6 +121,10 @@ final class SystemNotificationManager: ObservableObject {
     }
 
     func open(_ notification: SystemNotification) async -> Bool {
+        if let pane = notification.tmuxPane, !pane.isEmpty {
+            await Self.focusTmuxPane(pane)
+        }
+
         let workspace = NSWorkspace.shared
         if let actionURL = notification.actionURL {
             return workspace.open(actionURL)
@@ -297,6 +307,23 @@ final class SystemNotificationManager: ObservableObject {
         } catch {
             return false
         }
+    }
+
+    private nonisolated static func focusTmuxPane(_ pane: String) async {
+        await Task.detached {
+            guard let tmux = ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"]
+                .first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+            else { return }
+            for args in [["select-window", "-t", pane], ["select-pane", "-t", pane]] {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: tmux)
+                p.arguments = args
+                p.standardOutput = FileHandle.nullDevice
+                p.standardError = FileHandle.nullDevice
+                try? p.run()
+                p.waitUntilExit()
+            }
+        }.value
     }
 
     private func nonEmpty(_ value: String?) -> String? {

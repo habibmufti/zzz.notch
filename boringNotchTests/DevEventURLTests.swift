@@ -62,4 +62,18 @@ final class DevEventURLTests: XCTestCase {
         XCTAssertNil(plain.tool)
         XCTAssertEqual(plain.text, "running tests")
     }
+
+    func testParsesPidContextAndTmux() throws {
+        let url = try XCTUnwrap(URL(string: "zzznotch://notify?title=proj&status=run&pid=4242&context=142&tmux=%253"))
+        let event = try XCTUnwrap(DevEventURL.notification(from: url))
+
+        XCTAssertEqual(event.pid, 4242)
+        XCTAssertEqual(event.contextPercent, 100)
+        XCTAssertEqual(event.tmuxPane, "%3")
+
+        let badPid = try XCTUnwrap(URL(string: "zzznotch://notify?title=proj&pid=0&context=-5"))
+        let event2 = try XCTUnwrap(DevEventURL.notification(from: badPid))
+        XCTAssertNil(event2.pid)
+        XCTAssertEqual(event2.contextPercent, 0)
+    }
 }

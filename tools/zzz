@@ -7,6 +7,7 @@
 #              [--activity type|search|build|push|read] [--agents N] [--prompt "text"]
 #              [--now "headline"] [--intent "why"] [--command "raw command"] [--step "plan position"]
 #              [--agent-list "name · task" (one subagent per line)]
+#              [--pid PID] [--context 0..100] [--tmux PANE]
 #   zzz clear --id KEY
 #   zzz ask "question" --id KEY --option A [--option B ...] [--multiple] [--timeout S]
 #              waits for an answer in the notch and prints the chosen option(s), one per line.
@@ -78,10 +79,10 @@ case ${1:-} in
   *) usage >&2; exit 2 ;;
 esac
 
-title= body= status= source= symbol= app= url= id= duration= detail= activity= agents= prompt= now= intent= command= step= agentlist= npos=0
+title= body= status= source= symbol= app= url= id= duration= detail= activity= agents= prompt= now= intent= command= step= agentlist= pid= context= tmux= npos=0
 while [ $# -gt 0 ]; do
   case $1 in
-    --status|--source|--symbol|--app|--url|--id|--duration|--detail|--activity|--agents|--prompt|--now|--intent|--command|--step)
+    --status|--source|--symbol|--app|--url|--id|--duration|--detail|--activity|--agents|--prompt|--now|--intent|--command|--step|--pid|--context|--tmux)
       [ $# -ge 2 ] || { echo "zzz: $1 needs a value" >&2; exit 2; }
       eval "${1#--}=\$2"; shift 2 ;;
     --agent-list)
@@ -106,7 +107,7 @@ else
 fi
 
 query=
-for key in title body status source symbol app url id duration detail activity agents prompt now intent command step agentlist; do
+for key in title body status source symbol app url id duration detail activity agents prompt now intent command step agentlist pid context tmux; do
   eval "value=\$$key"
   [ -n "$value" ] || continue
   if [ "$key" = agentlist ]; then name=agentList; else name=$key; fi

@@ -366,6 +366,9 @@ private struct DevSessionCard: View {
                     }
                 }
             }
+            if let pct = item.contextPercent {
+                contextBar(percent: pct)
+            }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -528,6 +531,35 @@ private struct DevSessionCard: View {
                     }
             }
         }
+    }
+
+    private func contextBar(percent: Int) -> some View {
+        let clamped = min(max(percent, 0), 100)
+        let fraction = CGFloat(clamped) / 100
+        let barColor: Color = clamped >= 85 ? .red : (clamped >= 65 ? .yellow : .white.opacity(0.45))
+
+        return HStack(spacing: 8) {
+            Text("CONTEXT")
+                .font(.system(size: 9.5, weight: .semibold))
+                .tracking(0.6)
+                .foregroundStyle(.tertiary)
+                .fixedSize()
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(.white.opacity(0.1))
+                    Capsule()
+                        .fill(barColor)
+                        .frame(width: max(clamped > 0 ? 4 : 0, proxy.size.width * fraction))
+                }
+            }
+            .frame(height: 3.5)
+            Text("\(clamped)%")
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(clamped >= 65 ? barColor : .secondary)
+                .fixedSize()
+        }
+        .padding(.top, 2)
     }
 
     private var activitySymbol: String {
