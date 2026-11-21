@@ -132,7 +132,8 @@ struct DevActivityListView: View {
             .animation(.spring(response: 0.4, dampingFraction: 0.85), value: items.map(\.id))
             .animation(.spring(response: 0.35, dampingFraction: 0.85), value: active?.id)
         }
-        .frame(maxWidth: .infinity, height: min(max(contentHeight, 96), maxScrollHeight), alignment: .top)
+        .frame(height: min(max(contentHeight, 96), maxScrollHeight), alignment: .top)
+        .frame(maxWidth: .infinity, alignment: .top)
         .onPreferenceChange(DevContentHeightKey.self) { height in
             if height > 0 { contentHeight = height }
         }
