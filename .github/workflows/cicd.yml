@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Boring Notch (${{ matrix.xcode }} on ${{ matrix.os }})
+    name: Build zzz.notch (${{ matrix.xcode }} on ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -46,6 +46,8 @@ jobs:
         run: |
           app=$(find ~/Library/Developer/Xcode/DerivedData -maxdepth 5 -path '*/Build/Products/Release/*.app' -type d | head -1)
           test -n "$app" || { echo "::error::Release .app not found"; exit 1; }
+          # Stamp the built commit SHA so the in-app CI updater can compare versions.
+          plutil -replace ZZZBuildSHA -string "${GITHUB_SHA}" "$app/Contents/Info.plist"
           # The vendored MediaRemoteAdapter.framework carries upstream's Team ID;
           # with hardened runtime, library validation refuses it next to an
           # ad-hoc app. Re-sign the framework ad-hoc and reseal the app without

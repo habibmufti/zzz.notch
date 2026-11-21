@@ -5,7 +5,6 @@
 //  Created by Richard Kunkli on 07/08/2024.
 //
 
-import Sparkle
 import SwiftUI
 import SwiftUIIntrospect
 
@@ -66,12 +65,6 @@ struct SettingsView: View {
     @State private var selectedTab: SettingsTab = .general
     @State private var accentColorUpdateTrigger = UUID()
 
-    let updaterController: SPUStandardUpdaterController?
-
-    init(updaterController: SPUStandardUpdaterController? = nil) {
-        self.updaterController = updaterController
-    }
-
     var body: some View {
         NavigationSplitView {
             List(selection: $selectedTab) {
@@ -107,15 +100,7 @@ struct SettingsView: View {
                 case .dev:
                     DevSettingsView()
                 case .about:
-                    if let controller = updaterController {
-                        AboutView(updaterController: controller)
-                    } else {
-                        // Fallback with a default controller
-                        AboutView(
-                            updaterController: SPUStandardUpdaterController(
-                                startingUpdater: false, updaterDelegate: nil,
-                                userDriverDelegate: nil))
-                    }
+                    AboutView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

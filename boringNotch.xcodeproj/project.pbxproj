@@ -247,7 +247,7 @@
 		14A7E5962C65FD31008C1BE9 /* boring.m4a */ = {isa = PBXFileReference; lastKnownFileType = file; path = boring.m4a; sourceTree = "<group>"; };
 		14C08BB52C8DE42D000F8AA0 /* CalendarManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarManager.swift; sourceTree = "<group>"; };
 		14C08BB82C8DE4B1000F8AA0 /* BoringCalendar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoringCalendar.swift; sourceTree = "<group>"; };
-		14CEF4122C5CAED300855D72 /* Boring Notch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Boring Notch.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		14CEF4122C5CAED300855D72 /* zzz.notch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "zzz.notch.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		14CEF4152C5CAED300855D72 /* boringNotchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = boringNotchApp.swift; sourceTree = "<group>"; };
 		14CEF4172C5CAED300855D72 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		14CEF4192C5CAED400855D72 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -600,7 +600,7 @@
 		14CEF4132C5CAED300855D72 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				14CEF4122C5CAED300855D72 /* Boring Notch.app */,
+				14CEF4122C5CAED300855D72 /* zzz.notch.app */,
 				11F7484F2EC9AABA00F841DB /* BoringNotchXPCHelper.xpc */,
 				A5167212301F85B40018095A /* boringNotchTests.xctest */,
 			);
@@ -823,7 +823,7 @@
 				111BEA6E2ED166E20079DD4E /* MacroVisionKit */,
 			);
 			productName = dynamicNotch;
-			productReference = 14CEF4122C5CAED300855D72 /* Boring Notch.app */;
+			productReference = 14CEF4122C5CAED300855D72 /* zzz.notch.app */;
 			productType = "com.apple.product-type.application";
 		};
 		A5167211301F85B40018095A /* boringNotchTests */ = {
@@ -1307,7 +1307,7 @@
 				MARKETING_VERSION = "2.8-beta.0";
 				PRODUCT_BUNDLE_IDENTIFIER = com.habibmufti.zzznotch;
 				PRODUCT_MODULE_NAME = boringNotch;
-				PRODUCT_NAME = "Boring Notch";
+				PRODUCT_NAME = "zzz.notch";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
 				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
@@ -1375,7 +1375,7 @@
 				MARKETING_VERSION = "2.8-beta.0";
 				PRODUCT_BUNDLE_IDENTIFIER = com.habibmufti.zzznotch;
 				PRODUCT_MODULE_NAME = boringNotch;
-				PRODUCT_NAME = "Boring Notch";
+				PRODUCT_NAME = "zzz.notch";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
 				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
@@ -1401,18 +1401,18 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = JPWMG84CH8;
+				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.qareai.boringNotchTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.habibmufti.zzznotchTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Boring Notch.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Boring Notch";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/zzz.notch.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/zzz.notch";
 			};
 			name = Debug;
 		};
@@ -1424,18 +1424,18 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = JPWMG84CH8;
+				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.qareai.boringNotchTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.habibmufti.zzznotchTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Boring Notch.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Boring Notch";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/zzz.notch.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/zzz.notch";
 			};
 			name = Release;
 		};

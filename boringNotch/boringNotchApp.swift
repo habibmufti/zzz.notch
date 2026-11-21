@@ -8,7 +8,6 @@
 import AVFoundation
 import Defaults
 import KeyboardShortcuts
-import Sparkle
 import SwiftUI
 
 @MainActor
@@ -48,40 +47,10 @@ struct DynamicNotchApp: App {
     @Default(.menubarIcon) var showMenuBarIcon
     @Environment(\.openWindow) var openWindow
 
-    private let sparkleUpdaterDelegate: BoringSparkleUpdaterDelegate
-    let updaterController: SPUStandardUpdaterController
-
     init() {
         #if DEBUG
         OTPDetector.runSelfCheck()
         #endif
-        let sparkleUpdaterDelegate = BoringSparkleUpdaterDelegate()
-        self.sparkleUpdaterDelegate = sparkleUpdaterDelegate
-        updaterController = SPUStandardUpdaterController(
-            startingUpdater: false, updaterDelegate: sparkleUpdaterDelegate, userDriverDelegate: nil)
-        SoftwareUpdateStore.updater = updaterController.updater
-
-        // Initialize the settings window controller with the updater controller
-        SettingsWindowController.shared.setUpdaterController(updaterController)
-
-        Task { @MainActor in
-            let sourceURL = Bundle.main.bundleURL
-            if let destinationURL = LegacyAppBundleMigration.destinationURL(for: sourceURL) {
-                let migrated = await XPCHelperClient.shared.migrateLegacyAppBundle(
-                    from: sourceURL,
-                    to: destinationURL
-                )
-                if migrated {
-                    ApplicationRelauncher.restart(at: destinationURL) {
-                        LegacyAppBundleMigration.isRelaunching = true
-                    }
-                    return
-                }
-                NSLog("Failed to migrate legacy Boring Notch app bundle at %@", sourceURL.path)
-            }
-            // Sparkle stays unstarted until zzz.notch has its own signed appcast;
-            // the bundled feed still points at upstream Boring Notch releases.
-        }
     }
 
     var body: some Scene {
@@ -92,7 +61,7 @@ struct DynamicNotchApp: App {
                 }
             }
             .keyboardShortcut(KeyEquivalent(","), modifiers: .command)
-            CheckForUpdatesView(updater: updaterController.updater)
+            CheckForUpdatesView()
             Button("Restart zzz.notch") {
                 ApplicationRelauncher.restart()
             }
@@ -101,26 +70,6 @@ struct DynamicNotchApp: App {
             }
             .keyboardShortcut(KeyEquivalent("Q"), modifiers: .command)
         }
-    }
-}
-
-@MainActor
-enum SoftwareUpdateStore {
-    static var updater: SPUUpdater?
-}
-
-@MainActor
-final class BoringSparkleUpdaterDelegate: NSObject, SPUUpdaterDelegate {
-    func updaterShouldPromptForPermissionToCheck(forUpdates updater: SPUUpdater) -> Bool {
-        false
-    }
-
-    @objc func feedURLString(for updater: SPUUpdater) -> String? {
-        Defaults[.updateChannel].feedURLString
-    }
-
-    @objc func allowedChannels(for updater: SPUUpdater) -> Set<String> {
-        Defaults[.updateChannel].allowedSparkleChannels
     }
 }
 
@@ -453,10 +402,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.contentView = NSHostingView(
                 rootView: OnboardingView(
                     step: step,
-                    updater: SoftwareUpdateStore.updater,
                     onFinish: {
                         window.orderOut(nil)
-//                        NSApp.setActivationPolicy(.accessory)
                         window.close()
                         NSApp.deactivate()
                     },
