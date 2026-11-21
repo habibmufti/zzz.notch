@@ -7,6 +7,7 @@ import Defaults
 import SwiftUI
 
 struct DevSettingsView: View {
+    @Default(.devFullscreenMode) private var fullscreenMode
     @Default(.devAskInNotch) private var askInNotch
     @Default(.devAskTimeout) private var askTimeout
 
@@ -38,6 +39,20 @@ struct DevSettingsView: View {
                 Text("Mascots")
             } footer: {
                 Text("Music reactions show headphones and bobbing while music plays. Clicking a mascot always pokes it; the controls add play/pause on click and skip on double-click.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Picker("In full screen", selection: $fullscreenMode) {
+                    ForEach(DevFullscreenMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+            } header: {
+                Text("Full screen")
+            } footer: {
+                Text(fullscreenMode.summary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

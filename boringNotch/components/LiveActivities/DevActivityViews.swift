@@ -86,14 +86,16 @@ private struct DevContentHeightKey: PreferenceKey {
 struct DevActivityListView: View {
     @ObservedObject private var store = DevActivityStore.shared
     @Default(.devVerboseCard) private var verboseCard
-    @State private var selectedID: String?
     @State private var contentHeight: CGFloat = 160
+    /// High-water mark while the notch stays open so switching to a shorter
+    /// session does not pull the notch edge up from under the cursor and close it.
+    @State private var minOpenHeight: CGFloat = 0
 
     private var maxScrollHeight: CGFloat { max(140, devTabNotchHeight - 58) }
 
     var body: some View {
         let items = store.sortedItems
-        let active = selectedID.flatMap { id in items.first(where: { $0.id == id }) } ?? items.first
+        let active = store.selectedID.flatMap { id in items.first(where: { $0.id == id }) } ?? items.first
         let others = active.map { current in items.filter { $0.id != current.id } } ?? []
 
         ScrollView(.vertical, showsIndicators: false) {
@@ -107,7 +109,7 @@ struct DevActivityListView: View {
                                 ForEach(others) { item in
                                     DevCompactRow(item: item) {
                                         withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                                            selectedID = item.id
+                                            store.selectedID = item.id
                                         }
                                     }
                                 }
@@ -132,18 +134,16 @@ struct DevActivityListView: View {
             .animation(.spring(response: 0.4, dampingFraction: 0.85), value: items.map(\.id))
             .animation(.spring(response: 0.35, dampingFraction: 0.85), value: active?.id)
         }
-        .frame(height: min(max(contentHeight, 96), maxScrollHeight), alignment: .top)
+        .frame(height: min(max(max(contentHeight, minOpenHeight), 96), maxScrollHeight), alignment: .top)
         .frame(maxWidth: .infinity, alignment: .top)
         .onPreferenceChange(DevContentHeightKey.self) { height in
-            if height > 0 { contentHeight = height }
-        }
-        // A session asking for input jumps back to the front card automatically.
-        .onChange(of: items.first(where: { $0.status == .wait })?.id) { _, waitingID in
-            if let waitingID { selectedID = waitingID }
+            guard height > 0 else { return }
+            contentHeight = height
+            minOpenHeight = max(minOpenHeight, height)
         }
         .onChange(of: items.map(\.id)) { _, ids in
-            if let current = selectedID, !ids.contains(current) {
-                selectedID = nil
+            if let current = store.selectedID, !ids.contains(current) {
+                store.selectedID = nil
             }
         }
     }

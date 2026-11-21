@@ -22,6 +22,7 @@ final class BoringViewModel: NSObject, ObservableObject {
     var cancellables: Set<AnyCancellable> = []
 
     @Published var hideOnClosed: Bool = true
+    @Published var isAnyFullscreen: Bool = false
 
     @Published var edgeAutoOpenActive: Bool = false
     @Published var isHoveringCalendar: Bool = false
@@ -82,6 +83,19 @@ final class BoringViewModel: NSObject, ObservableObject {
             .sink { [weak self] shouldHide in
                 withAnimation(.smooth) {
                     self?.hideOnClosed = shouldHide
+                }
+            }
+            .store(in: &cancellables)
+
+        Publishers.CombineLatest(screenPublisher, detector.$anyFullscreenStatus.removeDuplicates())
+            .map { screenUUID, status in
+                status[screenUUID] ?? false
+            }
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] isFullscreen in
+                withAnimation(.smooth) {
+                    self?.isAnyFullscreen = isFullscreen
                 }
             }
             .store(in: &cancellables)

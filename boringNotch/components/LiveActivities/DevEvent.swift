@@ -189,6 +189,8 @@ final class DevActivityStore: ObservableObject {
     /// Ongoing events, in the order their ids first appeared, so each
     /// session's mascot keeps its spot in the notch.
     @Published private(set) var items: [SystemNotification] = []
+    /// Session currently inspected in the Dev tab card; nil follows `sortedItems.first`.
+    @Published var selectedID: String?
     /// Ids that just finished with `ok`, mapped to when their celebration ends.
     @Published private(set) var celebratingUntil: [String: Date] = [:]
     /// Last few `detail` lines per id, oldest first, shown on row hover.
@@ -237,6 +239,7 @@ final class DevActivityStore: ObservableObject {
             recent[event.id] = Array((recent[event.id, default: []] + [detail]).suffix(recentLimit))
         }
         if event.status == .wait, !wasWaiting {
+            selectedID = event.id
             var popup = event
             popup.displayDuration = nil
             playSound(for: .wait)
@@ -251,6 +254,7 @@ final class DevActivityStore: ObservableObject {
         expiry.removeValue(forKey: id)?.cancel()
         celebratingUntil[id] = nil
         recent[id] = nil
+        if selectedID == id { selectedID = nil }
         items.removeAll { $0.id == id }
     }
 

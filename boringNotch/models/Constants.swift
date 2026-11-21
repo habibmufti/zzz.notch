@@ -29,6 +29,37 @@ enum HideNotchOption: String, Defaults.Serializable {
     case never
 }
 
+enum DevFullscreenMode: String, CaseIterable, Identifiable, Defaults.Serializable {
+    case urgentOnly
+    case dim
+    case hide
+    case show
+
+    var id: String { rawValue }
+
+    var title: LocalizedStringKey {
+        switch self {
+        case .urgentOnly: "Urgent only"
+        case .dim: "Dim mascots"
+        case .hide: "Hide completely"
+        case .show: "Show normally"
+        }
+    }
+
+    var summary: LocalizedStringKey {
+        switch self {
+        case .urgentOnly:
+            "Hide idle and running mascots in full screen, but still pop up when an agent finishes, fails, or needs input."
+        case .dim:
+            "Keep mascots softly dimmed in full screen; brighten on hover or when an agent needs input."
+        case .hide:
+            "Hide all dev mascots and dev notifications while an app is in full screen."
+        case .show:
+            "Keep dev mascots and notifications visible even in full screen."
+        }
+    }
+}
+
 struct AppLanguage: RawRepresentable, Hashable, Identifiable, Defaults.Serializable {
     static let system = AppLanguage(rawValue: "system")
 
@@ -485,6 +516,7 @@ extension Defaults.Keys {
     static let devMascotMusicControls = Key<Bool>("devMascotMusicControls", default: true)
     static let devSubagentBadge = Key<Bool>("devSubagentBadge", default: true)
     static let devVerboseCard = Key<Bool>("devVerboseCard", default: true)
+    static let devFullscreenMode = Key<DevFullscreenMode>("devFullscreenMode", default: .urgentOnly)
     static let devAskInNotch = Key<Bool>("devAskInNotch", default: true)
     static let devAskTimeout = Key<Int>("devAskTimeout", default: 120)
 

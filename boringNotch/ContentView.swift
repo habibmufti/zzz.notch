@@ -38,6 +38,7 @@ struct ContentView: View {
     @Namespace var albumArtNamespace
 
     @Default(.showNotHumanFace) var showNotHumanFace
+    @Default(.devFullscreenMode) var devFullscreenMode
 
     // Use standardized animations from StandardAnimations enum
     private let animationSpring = StandardAnimations.interactive
@@ -96,6 +97,30 @@ struct ContentView: View {
         )
     }
 
+    private var shouldShowDevMascotsInFullscreen: Bool {
+        guard vm.isAnyFullscreen else { return true }
+        switch devFullscreenMode {
+        case .show, .dim: return true
+        case .urgentOnly: return devActivity.items.contains { $0.status == .wait }
+        case .hide: return false
+        }
+    }
+
+    private var shouldShowDevNotificationInFullscreen: Bool {
+        guard vm.isAnyFullscreen else { return true }
+        switch devFullscreenMode {
+        case .show, .dim, .urgentOnly: return true
+        case .hide: return false
+        }
+    }
+
+    private var isDimmingDevMascots: Bool {
+        vm.isAnyFullscreen
+            && devFullscreenMode == .dim
+            && !isHovering
+            && !devActivity.items.contains { $0.status == .wait }
+    }
+
     /// Closed-notch activities, newest first. A notification sits in front of
     /// music, so an incoming message takes over the display; when it expires
     /// it drops out of this list on its own and music comes back — no
@@ -104,10 +129,16 @@ struct ContentView: View {
         var items: [LiveActivityItem] = []
 
         if let notification = notificationManager.activeNotification {
-            items.append(.notification(notification))
+            if notification.status != nil {
+                if shouldShowDevNotificationInFullscreen {
+                    items.append(.notification(notification))
+                }
+            } else if !vm.hideOnClosed {
+                items.append(.notification(notification))
+            }
         }
 
-        if !devActivity.items.isEmpty {
+        if !devActivity.items.isEmpty && shouldShowDevMascotsInFullscreen {
             items.append(.dev)
         }
 
@@ -117,7 +148,7 @@ struct ContentView: View {
         // The inline song-change peek is drawn inside the music pill, so it
         // has to bring the pill with it even when the persistent live
         // activity is turned off — otherwise the peek never appears.
-        if musicIsShowing || showingInlineMusicPeek {
+        if (musicIsShowing || showingInlineMusicPeek) && !vm.hideOnClosed {
             items.append(.music)
         }
 
@@ -177,7 +208,7 @@ struct ContentView: View {
         if coordinator.shouldShowSneakPeek(on: vm.screenUUID) {
             return .osd(coordinator.sneakPeekState(for: vm.screenUUID).type)
         }
-        if !liveActivities.isEmpty, !vm.hideOnClosed {
+        if !liveActivities.isEmpty {
             return .activities(liveActivities)
         }
         if !coordinator.expandingView.show,
@@ -195,7 +226,7 @@ struct ContentView: View {
 
         if shouldDisplayNowPlayingFallbackNotice {
             chinWidth = nowPlayingFallbackNoticeWidth
-        } else if vm.notchState == .closed, !vm.hideOnClosed, let activity = selectedActivity {
+        } else if vm.notchState == .closed, let activity = selectedActivity {
             // Sized for whichever activity is actually on top, not for
             // whichever happens to exist — otherwise swiping to music while a
             // notification is still in the stack leaves the chin at the
@@ -447,13 +478,15 @@ struct ContentView: View {
                               gestureProgress: $gestureProgress
                           )
                               .transition(.opacity)
-                      } else if !liveActivities.isEmpty && vm.notchState == .closed && !vm.hideOnClosed {
+                      } else if !liveActivities.isEmpty && vm.notchState == .closed {
                           LiveActivityStack(items: liveActivities, index: $activityIndex) { item in
                               switch item {
                               case .notification(let notification):
                                   NotificationLiveActivity(notification: notification)
                               case .dev:
                                   DevActivityLiveActivity()
+                                      .opacity(isDimmingDevMascots ? 0.22 : 1)
+                                      .animation(.easeInOut(duration: 0.25), value: isDimmingDevMascots)
                               case .music:
                                   MusicLiveActivity()
                                       .frame(alignment: .center)
@@ -913,7 +946,7 @@ extension ContentView {
     }
 
     private func handleUpGesture(translation: CGFloat, phase: NSEvent.Phase) {
-        guard vm.notchState == .open && !vm.isHoveringCalendar else { return }
+        guard vm.notchState == .open && !vm.isHoveringCalendar && coordinator.currentView != .dev else { return }
 
         withAnimation(animationSpring) {
             gestureProgress = (translation / Defaults[.gestureSensitivity]) * -20
