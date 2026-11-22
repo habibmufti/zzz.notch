@@ -6,11 +6,16 @@ Reads Antigravity's camelCase hook payload from stdin, fires `zzz` asynchronousl
 so the synchronous hook never stalls the agent loop, and prints the required
 JSON response to stdout.
 
-Subagents (transcripts starting with a SYSTEM_MESSAGE bearing `sender=<parent>`)
-do not spawn their own mascot; instead they aggregate into the parent session's
-`--agents` badge and `--agent-list` card section. On `Stop`, completed sessions
-emit a single `ok`/`fail` result (4s celebration then auto-dismiss) instead of
-lingering as `idle` forever.
+Matches `omp-zzz-notch.ts` semantics:
+- One mascot per Antigravity host process (`agy-<pid>`, falling back to
+  `agy-<conv_id[:12]>` if PID detection fails), so `/new` or switching chats
+  in the same `agy` terminal reuses the same card without leaving ghosts.
+- Subagents (transcripts starting with a SYSTEM_MESSAGE bearing `sender=<parent>`)
+  do not spawn their own mascot; instead they aggregate into the parent session's
+  `--agents` badge and `--agent-list` card section.
+- On `Stop`, completed turns celebrate (`ok`/`fail`) then return to `idle`
+  (keeping `LAST RESULT` and dozing off after 3 min). When the `agy` terminal
+  process exits, `zzz.notch`'s `--pid` watcher removes the session automatically.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -116,6 +122,9 @@ def detect_action_url(root: str, app_bundle: str) -> str:
 
 def detect_host_pid() -> int | None:
     """Walk past transient sh/bash/zsh hook wrappers to find the persistent host PID."""
+    override = os.environ.get("ZZZ_HOST_PID", "").strip()
+    if override.isdigit() and int(override) > 1:
+        return int(override)
     pid = os.getppid()
     for _ in range(5):
         if pid <= 1:
@@ -292,14 +301,6 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
         pass
 
 
-def cleanup_state(path: Path) -> None:
-    for target in (path, path.with_suffix(".lock")):
-        try:
-            target.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-
 def activity_of(tool: str, args: dict[str, Any]) -> str:
     cmd = str(args.get("CommandLine") or args.get("command") or "")
     if PUSH_RE.search(cmd):
@@ -419,8 +420,30 @@ def fire_async(cmd: list[str]) -> None:
     )
 
 
+def fire_sequence_async(first: list[str], second: list[str], delay_s: float = 0.25) -> None:
+    if os.environ.get("ZZZ_DRY_RUN"):
+        subprocess.run(first, stdout=sys.stderr, check=False)
+        subprocess.run(second, stdout=sys.stderr, check=False)
+        return
+    if not os.path.exists(ZZZ):
+        return
+    script = (
+        f"{' '.join(shlex.quote(a) for a in first)} >/dev/null 2>&1; "
+        f"sleep {delay_s}; "
+        f"{' '.join(shlex.quote(a) for a in second)} >/dev/null 2>&1"
+    )
+    subprocess.Popen(
+        ["/bin/sh", "-c", script],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+
+
 def update_parent_subagent(
-    parent_conv_id: str,
+    parent_sid: str,
     sub_conv_id: str,
     adding: bool,
     fallback_task: str,
@@ -429,7 +452,6 @@ def update_parent_subagent(
     action_url: str,
 ) -> None:
     """Register or unregister a subagent on its parent session's badge/card."""
-    parent_sid = f"agy-{parent_conv_id[:12]}"
     parent_path = state_file_path(parent_sid)
 
     with state_lock(parent_path):
@@ -496,61 +518,57 @@ def handle_event(payload: dict[str, Any]) -> None:
     if event == "SessionStart":
         return
 
-    conv_id = str(payload.get("conversationId") or os.getppid())
-    session_id = f"agy-{conv_id[:12]}"
+    conv_id = str(payload.get("conversationId") or "")
+    host_pid = detect_host_pid()
+    session_id = f"agy-{host_pid}" if host_pid else f"agy-{conv_id[:12] or os.getppid()}"
     root = workspace_root(payload)
     project = os.path.basename(root.rstrip("/")) if root else "Antigravity"
     app_bundle = detect_app_bundle(payload)
     action_url = detect_action_url(root, app_bundle)
     transcript = str(payload.get("transcriptPath") or "")
 
+    prompt_raw = payload.get("lastUserInput")
+    prompt_from_payload = one_line(prompt_raw, 160) if isinstance(prompt_raw, str) and prompt_raw.strip() else ""
+
+    # Classify main agent vs subagent from transcript step 0.
+    is_sub, parent_conv_id, sub_task = inspect_transcript_origin(transcript)
+    if is_sub is None and not prompt_from_payload:
+        # No user input and no USER_INPUT step in transcript -> treat as subagent/internal.
+        return
+
+    if is_sub is True:
+        # Subagents live inside the same host `agy` process (same `session_id`);
+        # fall back to parent's conversation ID only if host PID was unavailable.
+        parent_sid = session_id if host_pid else (f"agy-{parent_conv_id[:12]}" if parent_conv_id else "")
+        if parent_sid:
+            update_parent_subagent(
+                parent_sid=parent_sid,
+                sub_conv_id=conv_id or transcript or "subagent",
+                adding=(event != "Stop"),
+                fallback_task=sub_task,
+                project=project,
+                app_bundle=app_bundle,
+                action_url=action_url,
+            )
+        return
+
     st_path = state_file_path(session_id)
     now_ts = time.monotonic()
 
     with state_lock(st_path):
         state = load_state(st_path)
+        prev_conv_id = str(state.get("conv_id") or "")
+        # If the user started a new conversation (`/new`) in the same `agy` process,
+        # reset stale prompt / subagent queues from the previous chat.
+        if conv_id and prev_conv_id and conv_id != prev_conv_id:
+            state["active_subagents"] = {}
+            state["pending_subagents"] = []
+            state["prompt"] = ""
+        if conv_id:
+            state["conv_id"] = conv_id
 
-        prompt_raw = payload.get("lastUserInput")
-        prompt = (
-            one_line(prompt_raw, 160)
-            if isinstance(prompt_raw, str) and prompt_raw.strip()
-            else str(state.get("prompt") or "")
-        )
+        prompt = prompt_from_payload or str(state.get("prompt") or "")
 
-        # Classify main agent vs subagent once from transcript step 0.
-        if state.get("is_subagent") is None:
-            is_sub, parent_id, sub_task = inspect_transcript_origin(transcript)
-            if is_sub is not None:
-                state["is_subagent"] = is_sub
-                if parent_id:
-                    state["parent_conv_id"] = parent_id
-                if sub_task:
-                    state["subagent_task"] = sub_task
-            elif not prompt:
-                # No user input and transcript hasn't written a USER_INPUT step:
-                # treat as non-user / subagent session and never spawn a card.
-                return
-
-        if state.get("is_subagent") is True:
-            parent_conv_id = str(state.get("parent_conv_id") or "")
-            sub_task = str(state.get("subagent_task") or "")
-            if event == "Stop":
-                cleanup_state(st_path)
-            else:
-                save_state(st_path, state)
-            if parent_conv_id:
-                update_parent_subagent(
-                    parent_conv_id=parent_conv_id,
-                    sub_conv_id=conv_id,
-                    adding=(event != "Stop"),
-                    fallback_task=sub_task,
-                    project=project,
-                    app_bundle=app_bundle,
-                    action_url=action_url,
-                )
-            return
-
-        host_pid: int | None = state.get("pid") if isinstance(state.get("pid"), int) else detect_host_pid()
         if host_pid:
             state["pid"] = host_pid
         state["project"] = project
@@ -657,41 +675,27 @@ def handle_event(payload: dict[str, Any]) -> None:
                 fire_async(make("Waiting on background tasks", "run", context_pct=ctx_pct, extra=extra))
                 return
 
-            # Antigravity has no SessionEnd hook and shares one daemon PID across
-            # chats, so emit a terminal result (4s celebration then auto-dismiss)
-            # instead of leaving an idle card behind for an hour.
-            cleanup_state(st_path)
+            # Turn finished: keep the mascot alive as `idle` (like omp) while the
+            # `agy` process is open; `zzz.notch` reaps it automatically via `--pid`
+            # once the `agy` terminal exits.
+            state["active_subagents"] = {}
+            state["pending_subagents"] = []
+            state.update({"status": "idle", "last_ts": now_ts, "prompt": prompt})
+            save_state(st_path, state)
+
             if reason == "ERROR" or error:
                 msg = one_line(error or "Execution error", 140)
-                fire_async(
-                    build_notify_args(
-                        project,
-                        msg,
-                        "fail",
-                        session_id,
-                        app_bundle,
-                        action_url=action_url,
-                        host_pid=host_pid,
-                        context_pct=ctx_pct,
-                        extra=extra,
-                    )
+                fire_sequence_async(
+                    make(msg, "fail", context_pct=ctx_pct, extra=extra),
+                    make(msg, "idle", context_pct=ctx_pct, extra=extra),
                 )
             elif reason == "USER_CANCELED":
-                fire_async([ZZZ, "clear", "--id", session_id])
+                fire_async(make("Canceled", "idle", context_pct=ctx_pct, extra=extra))
             else:
                 summary = summary_text or "Done"
-                fire_async(
-                    build_notify_args(
-                        project,
-                        summary,
-                        "ok",
-                        session_id,
-                        app_bundle,
-                        action_url=action_url,
-                        host_pid=host_pid,
-                        context_pct=ctx_pct,
-                        extra=extra,
-                    )
+                fire_sequence_async(
+                    make(summary, "ok", context_pct=ctx_pct, extra=extra),
+                    make(summary, "idle", context_pct=ctx_pct, extra=extra),
                 )
 
 
