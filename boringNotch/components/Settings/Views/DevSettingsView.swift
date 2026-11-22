@@ -10,6 +10,8 @@ struct DevSettingsView: View {
     @Default(.devFullscreenMode) private var fullscreenMode
     @Default(.devAskInNotch) private var askInNotch
     @Default(.devAskTimeout) private var askTimeout
+    @Default(.enableSystemTab) private var enableSystemTab
+    @Default(.systemRefreshInterval) private var systemRefreshInterval
 
     var body: some View {
         Form {
@@ -87,6 +89,29 @@ struct DevSettingsView: View {
                 Text("Questions")
             } footer: {
                 Text("When off, questions from dev tools are answered in the terminal instead. A question with no answer in time counts as skipped.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Defaults.Toggle(key: .enableSystemTab) {
+                    Text("Show System Usage tab")
+                }
+                Picker("Refresh interval", selection: $systemRefreshInterval) {
+                    Text("1 s").tag(1.0)
+                    Text("1.5 s").tag(1.5)
+                    Text("2 s").tag(2.0)
+                    Text("3 s").tag(3.0)
+                }
+                .disabled(!enableSystemTab)
+                Defaults.Toggle(key: .systemShowSparkline) {
+                    Text("Show CPU sparkline")
+                }
+                .disabled(!enableSystemTab)
+            } header: {
+                Text("System Usage")
+            } footer: {
+                Text("Samples CPU, memory pressure, network, disk, thermal state, and battery only while the notch is open on the System tab.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

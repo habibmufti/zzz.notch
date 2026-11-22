@@ -477,6 +477,11 @@ extension Defaults.Keys {
         default: "/Users/habib/Desktop/Projects/Personal/zzz.notch/tools/install.sh"
     )
 
+    // MARK: System usage
+    static let enableSystemTab = Key<Bool>("enableSystemTab", default: true)
+    static let systemRefreshInterval = Key<Double>("systemRefreshInterval", default: 1.5)
+    static let systemShowSparkline = Key<Bool>("systemShowSparkline", default: true)
+
     // MARK: Downloads
     static let enableDownloadListener = Key<Bool>("enableDownloadListener", default: true)
     static let enableSafariDownloads = Key<Bool>("enableSafariDownloads", default: true)

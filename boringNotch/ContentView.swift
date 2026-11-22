@@ -594,6 +594,8 @@ struct ContentView: View {
                             )
                         case .dev:
                             DevActivityListView()
+                        case .system:
+                            SystemUsageView()
                         }
                     }
                 }
