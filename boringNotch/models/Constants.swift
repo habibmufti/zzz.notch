@@ -29,6 +29,29 @@ enum HideNotchOption: String, Defaults.Serializable {
     case never
 }
 
+enum DevLiveActivityStyle: String, CaseIterable, Identifiable, Defaults.Serializable {
+    case face
+    case mascots
+
+    var id: String { rawValue }
+
+    var title: LocalizedStringKey {
+        switch self {
+        case .face: "Agent face"
+        case .mascots: "Pixel mascots"
+        }
+    }
+
+    var summary: LocalizedStringKey {
+        switch self {
+        case .face:
+            "Full procedural face in a dropped chin below the camera. Reacts live to running, waiting, finished, and idle agents."
+        case .mascots:
+            "Compact 16×16 pixel mascots flanking the camera, one per session."
+        }
+    }
+}
+
 enum DevFullscreenMode: String, CaseIterable, Identifiable, Defaults.Serializable {
     case urgentOnly
     case dim
@@ -467,6 +490,7 @@ extension Defaults.Keys {
     static let devSounds = Key<Bool>("devSounds", default: true)
     static let devMascotMusic = Key<Bool>("devMascotMusic", default: true)
     static let devMascotMusicControls = Key<Bool>("devMascotMusicControls", default: true)
+    static let devLiveActivityStyle = Key<DevLiveActivityStyle>("devLiveActivityStyle", default: .face)
     static let devSubagentBadge = Key<Bool>("devSubagentBadge", default: true)
     static let devVerboseCard = Key<Bool>("devVerboseCard", default: true)
     static let devFullscreenMode = Key<DevFullscreenMode>("devFullscreenMode", default: .urgentOnly)

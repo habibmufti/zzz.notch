@@ -39,6 +39,7 @@ struct ContentView: View {
 
     @Default(.showNotHumanFace) var showNotHumanFace
     @Default(.devFullscreenMode) var devFullscreenMode
+    @Default(.devLiveActivityStyle) var devLiveActivityStyle
 
     // Use standardized animations from StandardAnimations enum
     private let animationSpring = StandardAnimations.interactive
@@ -78,6 +79,18 @@ struct ContentView: View {
         return max(0, baseClosedTop * scaleFactor)
     }
 
+    private var isShowingDroppedChinFace: Bool {
+        guard vm.notchState == .closed else { return false }
+        switch closedNotchContent {
+        case .face:
+            return true
+        case .activities:
+            return selectedActivity == .dev && devLiveActivityStyle == .face
+        default:
+            return false
+        }
+    }
+
     private var currentNotchShape: NotchShape {
         // Scale bottom corner radius for closed notch shape when scaling is enabled.
         let baseClosedBottom = cornerRadiusInsets.closed.bottom
@@ -85,6 +98,8 @@ struct ContentView: View {
 
         if vm.notchState == .open {
             bottomCorner = openedInsets.bottom
+        } else if isShowingDroppedChinFace {
+            bottomCorner = 22
         } else if let scaleFactor = cornerRadiusScaleFactor {
             bottomCorner = max(0, baseClosedBottom * scaleFactor)
         } else {
@@ -235,7 +250,11 @@ struct ContentView: View {
             case .notification(let notification):
                 chinWidth += 2 * NotificationLiveActivity.slotSize(for: notification, notchHeight: vm.effectiveClosedNotchHeight) + 20
             case .dev:
-                chinWidth += 2 * DevActivityLiveActivity.sideWidth(count: devActivity.items.count, notchHeight: vm.effectiveClosedNotchHeight) + 4
+                if devLiveActivityStyle == .face {
+                    chinWidth += 20
+                } else {
+                    chinWidth += 2 * DevActivityLiveActivity.sideWidth(count: devActivity.items.count, notchHeight: vm.effectiveClosedNotchHeight) + 4
+                }
             case .music:
                 chinWidth += (2 * max(0, displayClosedNotchHeight - 12) + 20 + 2 * liveActivityEdgeMargin + 2)
                 // The inline song-change peek widens the pill itself, so the
@@ -248,7 +267,7 @@ struct ContentView: View {
         } else if !coordinator.expandingView.show && vm.notchState == .closed
             && (!musicManager.isPlaying && musicManager.isPlayerIdle) && Defaults[.showNotHumanFace]
             && !vm.hideOnClosed {
-            chinWidth += (2 * max(0, displayClosedNotchHeight - 12) + 20)
+            chinWidth += 20
         }
 
         return chinWidth
@@ -484,9 +503,15 @@ struct ContentView: View {
                               case .notification(let notification):
                                   NotificationLiveActivity(notification: notification)
                               case .dev:
-                                  DevActivityLiveActivity()
-                                      .opacity(isDimmingDevMascots ? 0.22 : 1)
-                                      .animation(.easeInOut(duration: 0.25), value: isDimmingDevMascots)
+                                  if devLiveActivityStyle == .face {
+                                      DevAgentFaceLiveActivity(cameraHeight: displayClosedNotchHeight)
+                                          .opacity(isDimmingDevMascots ? 0.22 : 1)
+                                          .animation(.easeInOut(duration: 0.25), value: isDimmingDevMascots)
+                                  } else {
+                                      DevActivityLiveActivity()
+                                          .opacity(isDimmingDevMascots ? 0.22 : 1)
+                                          .animation(.easeInOut(duration: 0.25), value: isDimmingDevMascots)
+                                  }
                               case .music:
                                   MusicLiveActivity()
                                       .frame(alignment: .center)
@@ -659,16 +684,7 @@ struct ContentView: View {
 
     @ViewBuilder
     func BoringFaceAnimation() -> some View {
-        HStack {
-            Rectangle()
-                .fill(.black)
-                .frame(width: vm.closedNotchSize.width + 20)
-            let faceScale = min(1.0, displayClosedNotchHeight / 30.0)
-            AnimatedFace(height: 24.0 * faceScale, width: 30.0 * faceScale)
-        }.frame(
-            height: displayClosedNotchHeight,
-            alignment: .center
-        )
+        IdleAgentFaceView(cameraHeight: displayClosedNotchHeight)
     }
 
     /// True while the song-change peek is expanding the closed pill inline.

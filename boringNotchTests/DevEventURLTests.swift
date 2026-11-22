@@ -76,4 +76,85 @@ final class DevEventURLTests: XCTestCase {
         XCTAssertNil(event2.pid)
         XCTAssertEqual(event2.contextPercent, 0)
     }
+
+    func testAgentFaceMoodPrioritizesWaitingThenWorkingThenDoneThenIdleProgression() {
+        let now = Date()
+        let run = SystemNotification(
+            id: "dev-run",
+            appName: "omp",
+            bundleID: nil,
+            title: "Task",
+            subtitle: nil,
+            body: nil,
+            receivedAt: now,
+            status: .run
+        )
+        let wait = SystemNotification(
+            id: "dev-wait",
+            appName: "omp",
+            bundleID: nil,
+            title: "Question",
+            subtitle: nil,
+            body: nil,
+            receivedAt: now,
+            status: .wait
+        )
+        let freshIdle = SystemNotification(
+            id: "dev-idle",
+            appName: "omp",
+            bundleID: nil,
+            title: "Idle",
+            subtitle: nil,
+            body: nil,
+            receivedAt: now.addingTimeInterval(-10),
+            status: .idle
+        )
+        let sleepyIdle = SystemNotification(
+            id: "dev-sleepy",
+            appName: "omp",
+            bundleID: nil,
+            title: "Sleepy",
+            subtitle: nil,
+            body: nil,
+            receivedAt: now.addingTimeInterval(-90),
+            status: .idle
+        )
+        let sleepingIdle = SystemNotification(
+            id: "dev-sleep",
+            appName: "omp",
+            bundleID: nil,
+            title: "Sleep",
+            subtitle: nil,
+            body: nil,
+            receivedAt: now.addingTimeInterval(-240),
+            status: .idle
+        )
+
+        XCTAssertEqual(AgentFaceMood.resolve(items: [run, wait], celebratingUntil: [:], now: now), .waiting)
+        XCTAssertEqual(AgentFaceMood.resolve(items: [freshIdle, run], celebratingUntil: [:], now: now), .working)
+        XCTAssertEqual(
+            AgentFaceMood.resolve(
+                items: [freshIdle],
+                celebratingUntil: [freshIdle.id: now.addingTimeInterval(3)],
+                now: now
+            ),
+            .done
+        )
+        XCTAssertEqual(AgentFaceMood.resolve(items: [freshIdle], celebratingUntil: [:], now: now), .idle)
+        XCTAssertEqual(AgentFaceMood.resolve(items: [sleepyIdle], celebratingUntil: [:], now: now), .sleepy)
+        XCTAssertEqual(AgentFaceMood.resolve(items: [sleepingIdle], celebratingUntil: [:], now: now), .sleep)
+    }
+
+    func testAgentFaceEngineConvergesToTargetPose() {
+        let engine = AgentFaceEngine(initialMood: .idle)
+        var t: TimeInterval = 0
+        for _ in 0..<90 {
+            t += 1.0 / 30.0
+            _ = engine.step(to: .working, at: t)
+        }
+        let target = AgentFacePose.target(.working)
+        XCTAssertEqual(engine.pose.eyeH, target.eyeH, accuracy: 0.01)
+        XCTAssertEqual(engine.pose.mouth, target.mouth, accuracy: 0.01)
+        XCTAssertTrue(engine.isSettled(for: .working))
+    }
 }

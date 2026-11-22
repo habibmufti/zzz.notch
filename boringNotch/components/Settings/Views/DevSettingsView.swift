@@ -7,6 +7,7 @@ import Defaults
 import SwiftUI
 
 struct DevSettingsView: View {
+    @Default(.devLiveActivityStyle) private var liveActivityStyle
     @Default(.devFullscreenMode) private var fullscreenMode
     @Default(.devAskInNotch) private var askInNotch
     @Default(.devAskTimeout) private var askTimeout
@@ -28,19 +29,28 @@ struct DevSettingsView: View {
             }
 
             Section {
-                Defaults.Toggle(key: .devMascotMusic) {
-                    Text("React to music")
+                Picker("Closed notch style", selection: $liveActivityStyle) {
+                    ForEach(DevLiveActivityStyle.allCases) { style in
+                        Text(style.title).tag(style)
+                    }
                 }
-                Defaults.Toggle(key: .devMascotMusicControls) {
-                    Text("Play/pause and skip music from mascots")
-                }
-                Defaults.Toggle(key: .devSubagentBadge) {
-                    Text("Show subagent count")
+                if liveActivityStyle == .mascots {
+                    Defaults.Toggle(key: .devMascotMusic) {
+                        Text("React to music")
+                    }
+                    Defaults.Toggle(key: .devMascotMusicControls) {
+                        Text("Play/pause and skip music from mascots")
+                    }
+                    Defaults.Toggle(key: .devSubagentBadge) {
+                        Text("Show subagent count")
+                    }
                 }
             } header: {
-                Text("Mascots")
+                Text("Closed notch")
             } footer: {
-                Text("Music reactions show headphones and bobbing while music plays. Clicking a mascot always pokes it; the controls add play/pause on click and skip on double-click.")
+                Text(liveActivityStyle == .mascots
+                    ? "Music reactions show headphones and bobbing while music plays. Clicking a mascot always pokes it; the controls add play/pause on click and skip on double-click."
+                    : liveActivityStyle.summary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
