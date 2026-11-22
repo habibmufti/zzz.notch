@@ -346,8 +346,24 @@ final class NotchWindowManager {
 
         let detector = DragDetector(notchRegion: notchRegion)
 
+        detector.onDragMove = { globalPoint in
+            Task { @MainActor in
+                MacFaceObserver.shared.updateDrag(
+                    globalPoint: globalPoint,
+                    notchCenter: CGPoint(x: screenFrame.midX, y: screenFrame.maxY - 40)
+                )
+            }
+        }
+
+        detector.onDragEnd = {
+            Task { @MainActor in
+                MacFaceObserver.shared.endDrag()
+            }
+        }
+
         detector.onDragEntersNotchRegion = { [weak self] in
             Task { @MainActor in
+                MacFaceObserver.shared.noteShelfDropAnticipation()
                 self?.handleDragEntersNotchRegion(onScreen: screen)
             }
         }

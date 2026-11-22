@@ -2,21 +2,31 @@
 //  AnimatedFace.swift
 //  zzz.notch
 //
-//  Unified procedural Mac companion face rendered in a dropped chin below the
-//  camera cutout. Uses steady poses with crisp discrete saccades (zero
-//  continuous swaying/bobbing to prevent motion sickness), a live scribbling
-//  nib animation while agents work, genre-adaptive music expressions + mini
-//  mouth equalizer, upcoming calendar badges, event-driven system health alerts,
-//  and real-time interactivity (cursor gaze, app switches, clicks/typing wake).
+//  Living Mac Companion Face rendered in a dropped chin below the camera.
+//  3-layer event-driven architecture (zero background polling, zero motion-sickness wobble):
+//    - Layer 1 (Base): Dev agents (3-phase organic scribble + quill nib), On-Call
+//      (CoreAudio mic / CoreMediaIO camera with breathing dot + sleep lock),
+//      Calendar meetings, System health (thermal, memory pressure, battery),
+//      Genre-adaptive Music (asymmetric 30ms/220ms FFT envelope + ambient RMS glow
+//      + vocal humming wave / mini EQ mouth), and Idle → Sleepy → Sleep.
+//    - Layer 2 (Spatial Override): Drag-to-Shelf live file tracking + magnetic
+//      eye widening, plus Idle cursor proximity tracking with 1.5s stillness auto-reset.
+//    - Layer 3 (One-Shot Reactions): 1.2s choreographed Wake/Unlock greeting,
+//      AirPods/Bluetooth connect (starry glints + sparkles), Wi-Fi drop/restore
+//      (1.5s NWPathMonitor debounce), Volume Mute & Vol 100% (1.0s cooldown),
+//      Charger plugged in, Agent fail, Notification glance, and Poke.
 //
 
 import AppKit
 import Combine
+import CoreAudio
+import CoreMediaIO
 import Defaults
 import IOKit.ps
+import Network
 import SwiftUI
 
-// MARK: - Moods & Reactions
+// MARK: - Moods, Reactions & Audio DSP Models
 
 enum AgentFaceMood: String, CaseIterable, Equatable, Sendable {
     case idle
@@ -25,6 +35,8 @@ enum AgentFaceMood: String, CaseIterable, Equatable, Sendable {
     case done
     case listening
     case meeting
+    case onCallCam
+    case onCallMic
     case overheated
     case strained
     case lowBattery
@@ -33,6 +45,10 @@ enum AgentFaceMood: String, CaseIterable, Equatable, Sendable {
 
     static let sleepyAfterSeconds: TimeInterval = 20
     static let sleepAfterSeconds: TimeInterval = 45
+
+    var isOnCall: Bool {
+        self == .onCallCam || self == .onCallMic
+    }
 
     var isUrgentInFullscreen: Bool {
         switch self {
@@ -74,6 +90,12 @@ enum AgentFaceMood: String, CaseIterable, Equatable, Sendable {
 }
 
 enum AgentFaceReaction: Equatable, Sendable {
+    case wake
+    case airpods
+    case wifiLost
+    case wifiRestored
+    case mute
+    case vol100
     case failed
     case charged
     case curious
@@ -83,6 +105,12 @@ enum AgentFaceReaction: Equatable, Sendable {
 
     var duration: TimeInterval {
         switch self {
+        case .wake: 1.2
+        case .airpods: 2.0
+        case .wifiLost: 2.4
+        case .wifiRestored: 1.8
+        case .mute: 1.8
+        case .vol100: 1.1
         case .failed: 3.0
         case .charged: 2.2
         case .curious: 1.8
@@ -93,13 +121,34 @@ enum AgentFaceReaction: Equatable, Sendable {
     }
 }
 
-/// Expressive music personality inferred from track genre metadata + live FFT bands.
 enum MusicVibe: String, CaseIterable, Equatable, Sendable {
     case chill
     case groove
     case hype
     case rock
     case melancholy
+}
+
+/// Asymmetric envelope follower: Fast Attack (30ms) + Slow Release (220ms).
+struct AsymmetricAudioEnvelope: Equatable, Sendable {
+    var envBass: Double = 0
+    var envMid: Double = 0
+    var envHigh: Double = 0
+    var envRms: Double = 0
+
+    mutating func update(rawBass: Double, rawMid: Double, rawHigh: Double, dt: Double) {
+        let clampedDT = min(max(dt, 0.001), 0.1)
+        envBass = Self.follow(cur: envBass, target: rawBass, dt: clampedDT)
+        envMid = Self.follow(cur: envMid, target: rawMid, dt: clampedDT)
+        envHigh = Self.follow(cur: envHigh, target: rawHigh, dt: clampedDT)
+        envRms = envBass * 0.45 + envMid * 0.40 + envHigh * 0.15
+    }
+
+    static func follow(cur: Double, target: Double, dt: Double) -> Double {
+        let tau = target > cur ? 0.03 : 0.22
+        let alpha = 1.0 - exp(-dt / tau)
+        return cur + (target - cur) * alpha
+    }
 }
 
 struct MusicAudioMetrics: Equatable, Sendable {
@@ -112,8 +161,6 @@ struct MusicAudioMetrics: Equatable, Sendable {
 
     static let silent = MusicAudioMetrics()
 
-    /// Extracts bass (60–380 Hz), mid/vocal (380–2.5 kHz), and treble (2.5–16 kHz)
-    /// from AudioCaptureManager's 6 log-spaced FFT bands.
     static func from(bars: [Float], previousBass: Double) -> MusicAudioMetrics {
         guard bars.count >= 6 else {
             let avg = bars.isEmpty ? 0 : Double(bars.reduce(0, +)) / Double(bars.count)
@@ -136,7 +183,6 @@ struct MusicAudioMetrics: Equatable, Sendable {
         )
     }
 
-    /// Fallback vibe inference from live FFT energy when no genre metadata is available.
     func inferredVibe() -> MusicVibe {
         if bass >= 0.52 && overall >= 0.45 {
             return .hype
@@ -175,8 +221,6 @@ enum MusicVibeClassifier {
         "reggae", "afrobeat", "latin", "city pop", "synthpop", "dance-pop"
     ]
 
-    /// Maps an iTunes `primaryGenreName` plus track/album/artist text into a `MusicVibe`.
-    /// Returns `nil` when metadata gives no clear signal so callers can fall back to live FFT.
     static func classify(
         genre: String?,
         title: String = "",
@@ -194,21 +238,11 @@ enum MusicVibeClassifier {
     }
 
     private static func matchText(_ text: String) -> MusicVibe? {
-        if chillKeywords.contains(where: { text.contains($0) }) {
-            return .chill
-        }
-        if melancholyKeywords.contains(where: { text.contains($0) }) {
-            return .melancholy
-        }
-        if rockKeywords.contains(where: { text.contains($0) }) {
-            return .rock
-        }
-        if hypeKeywords.contains(where: { text.contains($0) }) {
-            return .hype
-        }
-        if grooveKeywords.contains(where: { text.contains($0) }) {
-            return .groove
-        }
+        if chillKeywords.contains(where: { text.contains($0) }) { return .chill }
+        if melancholyKeywords.contains(where: { text.contains($0) }) { return .melancholy }
+        if rockKeywords.contains(where: { text.contains($0) }) { return .rock }
+        if hypeKeywords.contains(where: { text.contains($0) }) { return .hype }
+        if grooveKeywords.contains(where: { text.contains($0) }) { return .groove }
         return nil
     }
 }
@@ -223,7 +257,30 @@ struct UpcomingMeetingCue: Equatable, Sendable {
     }
 }
 
-/// Pure snapshot of all module inputs used to resolve the Mac companion face's mood.
+/// Layer 2 Spatial Override state for Drag-to-Shelf tracking.
+struct FaceDragState: Equatable, Sendable {
+    var active: Bool = false
+    /// Normalized offset relative to notch center (-1...1).
+    var offsetX: CGFloat = 0
+    var offsetY: CGFloat = 0
+    /// 0 far … 1 right on top of the notch (drives +14% magnetic anticipation).
+    var proximity: CGFloat = 0
+
+    static let inactive = FaceDragState()
+
+    static func from(globalPoint: CGPoint, notchCenter: CGPoint, maxRadius: CGFloat = 320) -> FaceDragState {
+        let dx = globalPoint.x - notchCenter.x
+        // macOS screen Y increases upward; SwiftUI canvas Y increases downward.
+        let dy = notchCenter.y - globalPoint.y
+        let dist = hypot(dx, dy)
+        let proximity = max(0, min(1, 1 - dist / maxRadius))
+        let nx = max(-1, min(1, dx / 220))
+        let ny = max(-0.4, min(1, dy / 220))
+        return FaceDragState(active: true, offsetX: nx, offsetY: ny, proximity: proximity)
+    }
+}
+
+/// Pure snapshot of all module inputs used to resolve Layer 1 base mood.
 struct MacFaceInputs: Equatable, Sendable {
     let devItems: [SystemNotification]
     let celebratingUntil: [String: Date]
@@ -231,6 +288,8 @@ struct MacFaceInputs: Equatable, Sendable {
     let reactToMusic: Bool
     let upcomingMeeting: UpcomingMeetingCue?
     let reactToCalendar: Bool
+    let isCameraActive: Bool
+    let isMicActive: Bool
     let thermalState: SystemThermalState
     let isMemoryPressured: Bool
     let batteryPercentage: Int?
@@ -240,14 +299,51 @@ struct MacFaceInputs: Equatable, Sendable {
     let lastActivityAt: Date
     let now: Date
 
+    init(
+        devItems: [SystemNotification],
+        celebratingUntil: [String: Date],
+        isMusicPlaying: Bool,
+        reactToMusic: Bool,
+        upcomingMeeting: UpcomingMeetingCue?,
+        reactToCalendar: Bool,
+        isCameraActive: Bool = false,
+        isMicActive: Bool = false,
+        thermalState: SystemThermalState,
+        isMemoryPressured: Bool,
+        batteryPercentage: Int?,
+        isCharging: Bool,
+        isPluggedIn: Bool,
+        reactToSystem: Bool,
+        lastActivityAt: Date,
+        now: Date
+    ) {
+        self.devItems = devItems
+        self.celebratingUntil = celebratingUntil
+        self.isMusicPlaying = isMusicPlaying
+        self.reactToMusic = reactToMusic
+        self.upcomingMeeting = upcomingMeeting
+        self.reactToCalendar = reactToCalendar
+        self.isCameraActive = isCameraActive
+        self.isMicActive = isMicActive
+        self.thermalState = thermalState
+        self.isMemoryPressured = isMemoryPressured
+        self.batteryPercentage = batteryPercentage
+        self.isCharging = isCharging
+        self.isPluggedIn = isPluggedIn
+        self.reactToSystem = reactToSystem
+        self.lastActivityAt = lastActivityAt
+        self.now = now
+    }
+
     var isLowBattery: Bool {
         guard let pct = batteryPercentage else { return false }
         return pct <= 15 && !isCharging && !isPluggedIn
     }
 
-    /// Resolves the unified base mood across every module in strict priority order:
+    /// Resolves Layer 1 Base Mood in strict priority order:
     /// Agent waiting > Imminent meeting > System critical (thermal/memory/battery)
-    /// > Agent working > Agent celebrating > Music listening > Idle → Sleepy → Sleep.
+    /// > Agent working > Agent celebrating > On-Call (Cam/Mic, locks out sleep)
+    /// > Music listening > Idle → Sleepy → Sleep.
     func resolveMood() -> AgentFaceMood {
         if devItems.contains(where: { $0.status == .wait }) {
             return .waiting
@@ -274,6 +370,10 @@ struct MacFaceInputs: Equatable, Sendable {
             return item.status == .ok
         }) {
             return .done
+        }
+        if reactToSystem {
+            if isCameraActive { return .onCallCam }
+            if isMicActive { return .onCallMic }
         }
         if reactToMusic, isMusicPlaying {
             return .listening
@@ -326,27 +426,49 @@ final class MacFaceObserver: ObservableObject {
     @Published private(set) var batteryPercentage: Int?
     @Published private(set) var isCharging = false
     @Published private(set) var isPluggedIn = false
+    @Published private(set) var isMicActive = false
+    @Published private(set) var isCameraActive = false
+    @Published private(set) var isWifiOnline = true
+    @Published private(set) var isAudioMuted = false
+    @Published private(set) var dragState: FaceDragState = .inactive
     @Published private(set) var lastActivityAt = Date()
     @Published private(set) var detectedTrackGenre: String?
     @Published private(set) var musicVibeFromMetadata: MusicVibe?
-    /// Brief subtle downward glance when the user is actively typing on the Mac.
+
     private(set) var lastTypingAt = Date.distantPast
-    /// Brief saccade cue when the user switches apps.
     private(set) var lastAppSwitchAt = Date.distantPast
     private(set) var appSwitchGlanceX: CGFloat = 0
 
     private(set) var activeReaction: AgentFaceReaction?
     private(set) var reactionAt = Date.distantPast
+    /// Incremented whenever a sparkle-worthy event fires so the renderer spawns a burst once.
+    private(set) var sparkleEventNonce: Int = 0
+    private(set) var lastSparkleColor: (r: Double, g: Double, b: Double) = (0.78, 0.82, 1.0)
 
     private var thermalObserver: NSObjectProtocol?
     private var appActivateObserver: NSObjectProtocol?
+    private var wakeObserver: NSObjectProtocol?
+    private var screenWakeObserver: NSObjectProtocol?
+    private var screenUnlockObserver: NSObjectProtocol?
     private var globalInputMonitor: Any?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var powerRunLoopSource: CFRunLoopSource?
+    private var pathMonitor: NWPathMonitor?
+    private var wifiDebounceTask: Task<Void, Never>?
+    private var audioOutputListener: AudioObjectPropertyListenerBlock?
+    private var micListeners: [(AudioObjectID, AudioObjectPropertyListenerBlock)] = []
+    private var cameraListeners: [(CMIOObjectID, CMIOObjectPropertyListenerBlock)] = []
+    private let hardwareQueue = DispatchQueue(label: "com.zzznotch.face.hardware", qos: .utility)
+
     private var cancellables = Set<AnyCancellable>()
     private var lastNotificationID: String?
+    private var lastOutputDeviceID: AudioDeviceID = 0
+    private var vol100CooldownUntil = Date.distantPast
+    private var didSeeInitialVolume = false
     private var genreLookupTask: Task<Void, Never>?
     private var genreCache: [String: String] = [:]
+    private var envelope = AsymmetricAudioEnvelope()
+    private var lastEnvelopeTime: Double?
     private var smoothedBass: Double = 0
     private var rollingEnergy: Double = 0
 
@@ -354,21 +476,22 @@ final class MacFaceObserver: ObservableObject {
         self.thermalState = SystemThermalState(ProcessInfo.processInfo.thermalState)
         refreshBatteryState(fireChargeReaction: false)
         installSystemObservers()
+        installNetworkObserver()
+        installHardwareAudioCameraObservers()
         installAppObservers()
         installUserActivityObservers()
     }
 
     deinit {
-        if let thermalObserver {
-            NotificationCenter.default.removeObserver(thermalObserver)
-        }
-        if let appActivateObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(appActivateObserver)
-        }
-        if let globalInputMonitor {
-            NSEvent.removeMonitor(globalInputMonitor)
-        }
+        if let thermalObserver { NotificationCenter.default.removeObserver(thermalObserver) }
+        if let appActivateObserver { NSWorkspace.shared.notificationCenter.removeObserver(appActivateObserver) }
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+        if let screenWakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(screenWakeObserver) }
+        if let screenUnlockObserver { DistributedNotificationCenter.default().removeObserver(screenUnlockObserver) }
+        if let globalInputMonitor { NSEvent.removeMonitor(globalInputMonitor) }
         memoryPressureSource?.cancel()
+        pathMonitor?.cancel()
+        wifiDebounceTask?.cancel()
         if let powerRunLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), powerRunLoopSource, .commonModes)
         }
@@ -381,10 +504,42 @@ final class MacFaceObserver: ObservableObject {
         }
     }
 
+    func updateDrag(globalPoint: CGPoint, notchCenter: CGPoint) {
+        dragState = FaceDragState.from(globalPoint: globalPoint, notchCenter: notchCenter)
+        lastActivityAt = Date()
+    }
+
+    func noteShelfDropAnticipation() {
+        emitSparkles(r: 0.22, g: 0.74, b: 0.97)
+    }
+
+    func endDrag() {
+        if dragState.active {
+            dragState = .inactive
+            lastActivityAt = Date()
+        }
+    }
+
+    func emitSparkles(r: Double, g: Double, b: Double) {
+        lastSparkleColor = (r, g, b)
+        sparkleEventNonce &+= 1
+    }
+
     func triggerReaction(_ reaction: AgentFaceReaction) {
         activeReaction = reaction
         reactionAt = Date()
         lastActivityAt = Date()
+
+        switch reaction {
+        case .airpods:
+            emitSparkles(r: 0.22, g: 0.74, b: 0.97)
+        case .wifiRestored:
+            emitSparkles(r: 0.20, g: 0.83, b: 0.60)
+        case .charged:
+            emitSparkles(r: 0.36, g: 0.96, b: 0.56)
+        default:
+            break
+        }
     }
 
     func currentReaction(at now: Date) -> (reaction: AgentFaceReaction, age: TimeInterval)? {
@@ -394,12 +549,10 @@ final class MacFaceObserver: ObservableObject {
         return (activeReaction, age)
     }
 
-    /// True right after user types so the face glances subtly toward the screen.
     func isUserActivelyTyping(at now: Date) -> Bool {
         now.timeIntervalSince(lastTypingAt) < 1.8
     }
 
-    /// Brief directional glance when switching apps (holds steady, never oscillates).
     func appSwitchLookX(at now: Date) -> CGFloat? {
         guard now.timeIntervalSince(lastAppSwitchAt) < 1.4 else { return nil }
         return appSwitchGlanceX
@@ -418,6 +571,8 @@ final class MacFaceObserver: ObservableObject {
         }
         return false
     }
+
+    // MARK: - Layer 3 & Layer 1 System Observers
 
     private func installSystemObservers() {
         thermalObserver = NotificationCenter.default.addObserver(
@@ -462,10 +617,291 @@ final class MacFaceObserver: ObservableObject {
             CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
             powerRunLoopSource = runLoopSource
         }
+
+        // Wake / Screen Wake / Screen Unlock -> 1.2s choreographed wake-up greeting!
+        let wsCenter = NSWorkspace.shared.notificationCenter
+        wakeObserver = wsCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard Defaults[.faceReactSystem] else { return }
+                self?.triggerReaction(.wake)
+            }
+        }
+        screenWakeObserver = wsCenter.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard Defaults[.faceReactSystem] else { return }
+                self?.triggerReaction(.wake)
+            }
+        }
+        screenUnlockObserver = DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.screenIsUnlocked"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard Defaults[.faceReactSystem] else { return }
+                self?.triggerReaction(.wake)
+            }
+        }
+    }
+
+    private func installNetworkObserver() {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let online = path.status == .satisfied
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if !online {
+                    guard self.isWifiOnline, self.wifiDebounceTask == nil else { return }
+                    // 1.5s debounce prevents brief Wi-Fi roam flickers from triggering reactions.
+                    self.wifiDebounceTask = Task { @MainActor [weak self] in
+                        try? await Task.sleep(for: .milliseconds(1500))
+                        guard !Task.isCancelled, let self else { return }
+                        self.wifiDebounceTask = nil
+                        self.isWifiOnline = false
+                        if Defaults[.faceReactSystem] {
+                            self.triggerReaction(.wifiLost)
+                        }
+                    }
+                } else {
+                    self.wifiDebounceTask?.cancel()
+                    self.wifiDebounceTask = nil
+                    if !self.isWifiOnline {
+                        self.isWifiOnline = true
+                        if Defaults[.faceReactSystem] {
+                            self.triggerReaction(.wifiRestored)
+                        }
+                    }
+                }
+            }
+        }
+        monitor.start(queue: hardwareQueue)
+        pathMonitor = monitor
+    }
+
+    private func installHardwareAudioCameraObservers() {
+        hardwareQueue.async { [weak self] in
+            guard let self else { return }
+            let initialOutput = Self.readDefaultOutputDeviceID()
+            let micActive = Self.isAnyAudioInputRunning()
+            let camActive = Self.isAnyCameraRunning()
+            Task { @MainActor in
+                self.lastOutputDeviceID = initialOutput
+                self.isMicActive = micActive
+                self.isCameraActive = camActive
+            }
+            self.registerDefaultOutputListener()
+            self.registerMicListeners()
+            self.registerCameraListeners()
+        }
+    }
+
+    private nonisolated func registerDefaultOutputListener() {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            let newID = Self.readDefaultOutputDeviceID()
+            let isWireless = Self.isWirelessOrHeadphoneDevice(newID)
+            Task { @MainActor in
+                guard newID != 0, newID != self.lastOutputDeviceID else { return }
+                self.lastOutputDeviceID = newID
+                if isWireless && Defaults[.faceReactSystem] {
+                    self.triggerReaction(.airpods)
+                }
+            }
+        }
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            hardwareQueue,
+            block
+        )
+        Task { @MainActor in
+            self.audioOutputListener = block
+        }
+    }
+
+    private nonisolated func registerMicListeners() {
+        let inputIDs = Self.allInputAudioDeviceIDs()
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var registered: [(AudioObjectID, AudioObjectPropertyListenerBlock)] = []
+        for id in inputIDs {
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                let running = Self.isAnyAudioInputRunning()
+                Task { @MainActor in
+                    guard let self, self.isMicActive != running else { return }
+                    self.isMicActive = running
+                    self.lastActivityAt = Date()
+                }
+            }
+            if AudioObjectAddPropertyListenerBlock(id, &address, hardwareQueue, block) == noErr {
+                registered.append((id, block))
+            }
+        }
+        Task { @MainActor in
+            self.micListeners = registered
+        }
+    }
+
+    private nonisolated func registerCameraListeners() {
+        let camIDs = Self.allCameraDeviceIDs()
+        var address = CMIOObjectPropertyAddress(
+            mSelector: CMIOObjectPropertySelector(kCMIODevicePropertyDeviceIsRunningSomewhere),
+            mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
+            mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain)
+        )
+        var registered: [(CMIOObjectID, CMIOObjectPropertyListenerBlock)] = []
+        for id in camIDs {
+            let block: CMIOObjectPropertyListenerBlock = { [weak self] _, _ in
+                let running = Self.isAnyCameraRunning()
+                Task { @MainActor in
+                    guard let self, self.isCameraActive != running else { return }
+                    self.isCameraActive = running
+                    self.lastActivityAt = Date()
+                }
+            }
+            if CMIOObjectAddPropertyListenerBlock(id, &address, hardwareQueue, block) == noErr {
+                registered.append((id, block))
+            }
+        }
+        Task { @MainActor in
+            self.cameraListeners = registered
+        }
+    }
+
+    private nonisolated static func readDefaultOutputDeviceID() -> AudioDeviceID {
+        var deviceID = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &deviceID
+        )
+        return status == noErr ? deviceID : 0
+    }
+
+    private nonisolated static func isWirelessOrHeadphoneDevice(_ deviceID: AudioDeviceID) -> Bool {
+        guard deviceID != 0 else { return false }
+        var transport: UInt32 = 0
+        var tSize = UInt32(MemoryLayout<UInt32>.size)
+        var tAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        if AudioObjectGetPropertyData(deviceID, &tAddr, 0, nil, &tSize, &transport) == noErr,
+           transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE {
+            return true
+        }
+        var nameRef: CFString?
+        var nSize = UInt32(MemoryLayout<CFString?>.size)
+        var nAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertyName,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = withUnsafeMutablePointer(to: &nameRef) { ptr in
+            AudioObjectGetPropertyData(deviceID, &nAddr, 0, nil, &nSize, ptr)
+        }
+        guard status == noErr, let name = (nameRef as String?)?.lowercased() else { return false }
+        return name.contains("airpods") || name.contains("headphone") || name.contains("beats") || name.contains("buds")
+    }
+
+    private nonisolated static func allInputAudioDeviceIDs() -> [AudioDeviceID] {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size) == noErr,
+              size > 0 else { return [] }
+        var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &ids) == noErr else {
+            return []
+        }
+        return ids.filter { id in
+            var inAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreams,
+                mScope: kAudioDevicePropertyScopeInput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var inSize: UInt32 = 0
+            return AudioObjectGetPropertyDataSize(id, &inAddr, 0, nil, &inSize) == noErr && inSize > 0
+        }
+    }
+
+    private nonisolated static func isAnyAudioInputRunning() -> Bool {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        for id in allInputAudioDeviceIDs() {
+            var running: UInt32 = 0
+            var size = UInt32(MemoryLayout<UInt32>.size)
+            if AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &running) == noErr, running != 0 {
+                return true
+            }
+        }
+        return false
+    }
+
+    private nonisolated static func allCameraDeviceIDs() -> [CMIOObjectID] {
+        var addr = CMIOObjectPropertyAddress(
+            mSelector: CMIOObjectPropertySelector(kCMIOHardwarePropertyDevices),
+            mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
+            mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain)
+        )
+        var dataSize: UInt32 = 0
+        guard CMIOObjectGetPropertyDataSize(CMIOObjectID(kCMIOObjectSystemObject), &addr, 0, nil, &dataSize) == noErr,
+              dataSize > 0 else { return [] }
+        var ids = [CMIOObjectID](repeating: 0, count: Int(dataSize) / MemoryLayout<CMIOObjectID>.size)
+        var used: UInt32 = 0
+        guard CMIOObjectGetPropertyData(CMIOObjectID(kCMIOObjectSystemObject), &addr, 0, nil, dataSize, &used, &ids) == noErr else {
+            return []
+        }
+        return ids
+    }
+
+    private nonisolated static func isAnyCameraRunning() -> Bool {
+        var addr = CMIOObjectPropertyAddress(
+            mSelector: CMIOObjectPropertySelector(kCMIODevicePropertyDeviceIsRunningSomewhere),
+            mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
+            mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain)
+        )
+        for id in allCameraDeviceIDs() {
+            var running: UInt32 = 0
+            var used: UInt32 = 0
+            let status = CMIOObjectGetPropertyData(
+                id, &addr, 0, nil, UInt32(MemoryLayout<UInt32>.size), &used, &running
+            )
+            if status == noErr, running != 0 {
+                return true
+            }
+        }
+        return false
     }
 
     private func installUserActivityObservers() {
-        // Wake & glance briefly when switching foreground apps (0% idle CPU).
         appActivateObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
@@ -482,8 +918,6 @@ final class MacFaceObserver: ObservableObject {
             }
         }
 
-        // Wake the face when the user clicks or types anywhere on the Mac.
-        // Never reads key characters — only records activity timestamp (throttled).
         globalInputMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .keyDown]
         ) { [weak self] event in
@@ -521,6 +955,45 @@ final class MacFaceObserver: ObservableObject {
             }
             .store(in: &cancellables)
 
+        DevActivityStore.shared.$celebratingUntil
+            .dropFirst()
+            .sink { [weak self] map in
+                if !map.isEmpty {
+                    self?.emitSparkles(r: 0.65, g: 0.71, b: 0.99)
+                }
+            }
+            .store(in: &cancellables)
+
+        // Volume Mute & Vol 100% (1.0s cooldown) from existing VolumeManager!
+        let volume = VolumeManager.shared
+        volume.$isMuted
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] muted in
+                guard let self else { return }
+                self.isAudioMuted = muted
+                if muted && Defaults[.faceReactSystem] {
+                    self.triggerReaction(.mute)
+                }
+            }
+            .store(in: &cancellables)
+
+        volume.$rawVolume
+            .removeDuplicates()
+            .sink { [weak self] vol in
+                guard let self else { return }
+                guard self.didSeeInitialVolume else {
+                    self.didSeeInitialVolume = true
+                    return
+                }
+                let now = Date()
+                if vol >= 0.99, !self.isAudioMuted, now >= self.vol100CooldownUntil, Defaults[.faceReactSystem] {
+                    self.vol100CooldownUntil = now.addingTimeInterval(1.0)
+                    self.triggerReaction(.vol100)
+                }
+            }
+            .store(in: &cancellables)
+
         let music = MusicManager.shared
         music.$isPlaying
             .removeDuplicates()
@@ -549,21 +1022,25 @@ final class MacFaceObserver: ObservableObject {
         .store(in: &cancellables)
     }
 
-    func sampleAudioMetrics(at t: Double, isPlaying: Bool) -> (metrics: MusicAudioMetrics, vibe: MusicVibe) {
-        guard isPlaying else {
+    func sampleAudioMetrics(at t: Double, isPlaying: Bool) -> (metrics: MusicAudioMetrics, envelope: AsymmetricAudioEnvelope, vibe: MusicVibe) {
+        let dt = lastEnvelopeTime.map { max(0.001, min(0.1, t - $0)) } ?? (1.0 / 30.0)
+        lastEnvelopeTime = t
+
+        guard isPlaying && !isAudioMuted else {
             smoothedBass = 0
             rollingEnergy = 0
-            return (.silent, musicVibeFromMetadata ?? .groove)
+            envelope.update(rawBass: 0, rawMid: 0, rawHigh: 0, dt: dt)
+            return (.silent, envelope, musicVibeFromMetadata ?? .groove)
         }
 
         let capture = AudioCaptureManager.shared
-        let metrics: MusicAudioMetrics
+        let rawMetrics: MusicAudioMetrics
         if capture.isCapturing, let bars = capture.latestLevelsSnapshot(), !bars.isEmpty {
-            metrics = MusicAudioMetrics.from(bars: bars, previousBass: smoothedBass)
-            smoothedBass = smoothedBass * 0.72 + metrics.bass * 0.28
+            rawMetrics = MusicAudioMetrics.from(bars: bars, previousBass: smoothedBass)
+            smoothedBass = smoothedBass * 0.72 + rawMetrics.bass * 0.28
             rollingEnergy = rollingEnergy == 0
-                ? metrics.overall
-                : rollingEnergy * 0.94 + metrics.overall * 0.06
+                ? rawMetrics.overall
+                : rollingEnergy * 0.94 + rawMetrics.overall * 0.06
         } else {
             let beatSpeed: Double = {
                 switch musicVibeFromMetadata {
@@ -576,36 +1053,43 @@ final class MacFaceObserver: ObservableObject {
             }()
             let bands: [Double] = (0..<6).map { i in
                 let phase = t * 2 * .pi * beatSpeed + Double(i) * 0.75
-                return 0.18 + 0.55 * max(0, sin(phase))
+                return 0.16 + 0.52 * max(0, sin(phase))
             }
             let level = bands.reduce(0, +) / 6.0
-            metrics = MusicAudioMetrics(
+            rawMetrics = MusicAudioMetrics(
                 bass: (bands[0] + bands[1]) * 0.5,
                 mid: (bands[2] + bands[3]) * 0.5,
                 treble: (bands[4] + bands[5]) * 0.5,
                 overall: level,
-                bassPunch: bands[0] > 0.62 ? (bands[0] - 0.62) * 2.4 : 0,
+                bassPunch: bands[0] > 0.60 ? (bands[0] - 0.60) * 2.4 : 0,
                 bands: bands
             )
             rollingEnergy = level
         }
+
+        envelope.update(
+            rawBass: rawMetrics.bass,
+            rawMid: rawMetrics.mid,
+            rawHigh: rawMetrics.treble,
+            dt: dt
+        )
 
         let resolvedVibe: MusicVibe
         if let metaVibe = musicVibeFromMetadata {
             resolvedVibe = metaVibe
         } else {
             let energySnapshot = MusicAudioMetrics(
-                bass: smoothedBass > 0 ? smoothedBass : metrics.bass,
-                mid: metrics.mid,
-                treble: metrics.treble,
-                overall: rollingEnergy > 0 ? rollingEnergy : metrics.overall,
-                bassPunch: metrics.bassPunch,
-                bands: metrics.bands
+                bass: smoothedBass > 0 ? smoothedBass : rawMetrics.bass,
+                mid: rawMetrics.mid,
+                treble: rawMetrics.treble,
+                overall: rollingEnergy > 0 ? rollingEnergy : rawMetrics.overall,
+                bassPunch: rawMetrics.bassPunch,
+                bands: rawMetrics.bands
             )
             resolvedVibe = energySnapshot.inferredVibe()
         }
 
-        return (metrics, resolvedVibe)
+        return (rawMetrics, envelope, resolvedVibe)
     }
 
     private func refreshMusicGenre(title: String, artist: String, album: String) {
@@ -705,10 +1189,61 @@ final class MacFaceObserver: ObservableObject {
     }
 }
 
+// MARK: - Damped Harmonic Spring & Multi-Harmonic Organic Ink Wave
+
+struct FaceSpring: Equatable, Sendable {
+    var value: CGFloat
+    var target: CGFloat
+    var velocity: CGFloat = 0
+    var stiffness: CGFloat
+    var damping: CGFloat
+
+    init(initial: CGFloat, stiffness: CGFloat = 250, damping: CGFloat = 24) {
+        self.value = initial
+        self.target = initial
+        self.stiffness = stiffness
+        self.damping = damping
+    }
+
+    mutating func impulse(_ dv: CGFloat) {
+        velocity += dv
+    }
+
+    @discardableResult
+    mutating func update(dt: CGFloat) -> CGFloat {
+        let force = (target - value) * stiffness
+        let damp = velocity * damping
+        velocity += (force - damp) * dt
+        value += velocity * dt
+        return value
+    }
+
+    var isSettled: Bool {
+        abs(target - value) < 0.008 && abs(velocity) < 0.02
+    }
+}
+
+enum OrganicScribble {
+    enum Phase: Equatable, Sendable {
+        case writing
+        case pause
+        case returning
+    }
+
+    /// 3-harmonic hand-drawn organic wave (directly adapted from Living Dynamic Notch PoC).
+    static func sampleWave(u: Double, seed1: Double, seed2: Double) -> CGFloat {
+        let clamped = max(0, min(1, u))
+        let env = 0.42 + 0.58 * pow(sin(clamped * .pi), 0.55)
+        let w1 = sin(clamped * .pi * 6.2 * seed1) * 2.2
+        let w2 = sin(clamped * .pi * 13.4 * seed2 + 1.1) * 0.95
+        let w3 = cos(clamped * .pi * 2.9 + seed1 * 1.8) * 0.65
+        return CGFloat((w1 + w2 + w3) * env)
+    }
+}
+
 // MARK: - Discrete Saccade Planner (Steady Holds, Zero Motion Sickness)
 
 enum FaceSaccade {
-    /// Deterministic hash in 0..<1 for natural non-metronomic eye holds & blinks.
     static func hash01(_ n: Int) -> Double {
         var x = UInt64(bitPattern: Int64(n)) &* 0x9E37_79B9_7F4A_7C15
         x ^= x >> 29
@@ -717,59 +1252,50 @@ enum FaceSaccade {
         return Double(x % 10_000) / 10_000.0
     }
 
-    /// Returns a **constant** look offset that holds completely still for 2.8–4.5s,
-    /// then snaps cleanly to a new target via the spring engine (no sine wobble!).
+    /// Holds completely still for ~3.2–4.0s, then snaps cleanly to a new gaze point via spring.
     static func discreteLook(at t: TimeInterval, mood: AgentFaceMood) -> CGPoint {
         switch mood {
-        case .sleep, .sleepy, .lowBattery, .overheated, .strained:
+        case .sleep, .sleepy, .lowBattery, .overheated, .strained, .done, .onCallCam, .onCallMic:
             return .zero
         case .working:
-            // Eyes stay steady, gently glancing down toward the scribbling nib.
-            return CGPoint(x: 0, y: 0.04)
+            return .zero
         case .waiting:
-            // Mostly steady straight ahead, occasional small attentive shift.
             let slot = Int(floor(t / 3.2))
             let r = hash01(slot &+ 91)
-            if r < 0.72 { return .zero }
-            return CGPoint(x: r < 0.86 ? -0.07 : 0.07, y: 0)
+            if r < 0.74 { return .zero }
+            return CGPoint(x: r < 0.87 ? -5.0 : 5.0, y: 0)
         case .meeting:
             let slot = Int(floor(t / 3.0))
             let r = hash01(slot &+ 137)
-            return CGPoint(x: r < 0.5 ? 0 : (r < 0.75 ? -0.09 : 0.09), y: -0.02)
-        case .done:
-            return .zero
+            return CGPoint(x: r < 0.55 ? 0 : (r < 0.78 ? -7.0 : 7.0), y: -1.5)
         case .listening:
-            // Hold steady for ~3.5s per phrase, occasionally glance left/right.
-            let slot = Int(floor(t / 3.6))
+            let slot = Int(floor(t / 3.8))
             let r = hash01(slot &+ 211)
-            if r < 0.55 { return .zero }
-            if r < 0.78 { return CGPoint(x: 0.13, y: -0.02) }
-            return CGPoint(x: -0.13, y: -0.02)
+            if r < 0.58 { return .zero }
+            if r < 0.79 { return CGPoint(x: 9.0, y: -1.0) }
+            return CGPoint(x: -9.0, y: -1.0)
         case .idle:
-            // Classic video behavior: hold center, occasionally snap left/right & hold still.
             let slot = Int(floor(t / 3.8))
             let r = hash01(slot &+ 43)
-            if r < 0.52 { return .zero }
-            if r < 0.74 { return CGPoint(x: 0.16, y: 0.01) }
-            if r < 0.94 { return CGPoint(x: -0.16, y: 0.01) }
-            return CGPoint(x: 0, y: 0.07)
+            if r < 0.54 { return .zero }
+            if r < 0.76 { return CGPoint(x: 11.0, y: 0.5) }
+            if r < 0.94 { return CGPoint(x: -11.0, y: 0.5) }
+            return CGPoint(x: 0, y: 4.5)
         }
     }
 
-    /// Natural randomized single or occasional double blink inside each ~3.8s slot.
     static func isBlinking(at t: TimeInterval, mood: AgentFaceMood) -> Bool {
         guard mood != .sleep && mood != .sleepy else { return false }
-        let slotLength = mood == .listening ? 4.2 : 3.8
+        let slotLength: Double = mood.isOnCall ? 5.2 : (mood == .listening ? 4.2 : 3.8)
         let slot = Int(floor(t / slotLength))
         let local = t - Double(slot) * slotLength
         let blinkAt = 0.6 + hash01(slot &+ 17) * (slotLength - 1.2)
-        if local >= blinkAt && local <= blinkAt + 0.11 {
+        if local >= blinkAt && local <= blinkAt + 0.105 {
             return true
         }
-        // ~20% chance of a quick expressive double-blink.
-        if hash01(slot &+ 59) < 0.20 {
-            let secondAt = blinkAt + 0.22
-            if local >= secondAt && local <= secondAt + 0.10 {
+        if hash01(slot &+ 59) < 0.22 {
+            let secondAt = blinkAt + 0.21
+            if local >= secondAt && local <= secondAt + 0.095 {
                 return true
             }
         }
@@ -777,161 +1303,500 @@ enum FaceSaccade {
     }
 }
 
-// MARK: - Procedural Pose & Spring Physics
+// MARK: - Living Avatar Physics Engine (15 Springs + 3-Phase Scribble + Particles)
 
-/// Every pose is a small vector of normalized numbers; the canvas only draws these.
-struct AgentFacePose: Equatable, Sendable {
-    var eyeW: CGFloat
-    var eyeH: CGFloat
-    var lookX: CGFloat
-    var lookY: CGFloat
-    /// 0 upright … +1 inward fierce/focused tilt (\ /), -1 soft outer droop (/ \).
-    var tilt: CGFloat
-    /// 0 hidden … 1 active scribble/working mode.
-    var scribble: CGFloat
-    /// Color blend weights (interpolated smoothly by the spring).
-    var red: Double
-    var green: Double
-    var blue: Double
-    /// 0 normal … 1 happy smile arc.
-    var smile: Double
-
-    static func target(_ mood: AgentFaceMood, musicVibe: MusicVibe = .groove) -> AgentFacePose {
-        switch mood {
-        case .idle:
-            // Chunky expressive tall pills matching the reference video (00:00–00:04).
-            AgentFacePose(eyeW: 0.34, eyeH: 0.74, lookX: 0, lookY: 0, tilt: 0, scribble: 0, red: 0.88, green: 0.88, blue: 0.98, smile: 0)
-        case .working:
-            // Focused inward-angled eyes + scribbling nib below (video 00:05–00:16).
-            AgentFacePose(eyeW: 0.34, eyeH: 0.66, lookX: 0, lookY: -0.06, tilt: 0.85, scribble: 1, red: 0.88, green: 0.88, blue: 0.98, smile: 0)
-        case .waiting:
-            AgentFacePose(eyeW: 0.36, eyeH: 0.86, lookX: 0, lookY: -0.06, tilt: 0, scribble: 0, red: 1.00, green: 0.86, blue: 0.22, smile: 0)
-        case .done:
-            AgentFacePose(eyeW: 0.36, eyeH: 0.56, lookX: 0, lookY: -0.03, tilt: 0, scribble: 0, red: 0.45, green: 0.95, blue: 0.66, smile: 1)
-        case .listening:
-            switch musicVibe {
-            case .chill:
-                AgentFacePose(eyeW: 0.40, eyeH: 0.36, lookX: 0, lookY: 0.03, tilt: 0, scribble: 0, red: 0.86, green: 0.84, blue: 0.98, smile: 0.60)
-            case .groove:
-                AgentFacePose(eyeW: 0.35, eyeH: 0.64, lookX: 0, lookY: -0.02, tilt: 0, scribble: 0, red: 0.82, green: 0.88, blue: 1.00, smile: 0.90)
-            case .hype:
-                AgentFacePose(eyeW: 0.35, eyeH: 0.72, lookX: 0, lookY: -0.06, tilt: 0.25, scribble: 0, red: 0.96, green: 0.62, blue: 0.96, smile: 0)
-            case .rock:
-                AgentFacePose(eyeW: 0.36, eyeH: 0.66, lookX: 0, lookY: -0.05, tilt: 1.0, scribble: 0, red: 1.00, green: 0.48, blue: 0.44, smile: 0)
-            case .melancholy:
-                AgentFacePose(eyeW: 0.34, eyeH: 0.60, lookX: 0, lookY: 0.04, tilt: -0.85, scribble: 0, red: 0.62, green: 0.76, blue: 0.98, smile: 0)
-            }
-        case .meeting:
-            AgentFacePose(eyeW: 0.35, eyeH: 0.78, lookX: 0, lookY: -0.06, tilt: 0, scribble: 0, red: 0.44, green: 0.90, blue: 1.00, smile: 0)
-        case .overheated:
-            AgentFacePose(eyeW: 0.38, eyeH: 0.44, lookX: 0, lookY: 0.04, tilt: -0.55, scribble: 0, red: 1.00, green: 0.54, blue: 0.28, smile: 0)
-        case .strained:
-            AgentFacePose(eyeW: 0.42, eyeH: 0.26, lookX: 0, lookY: 0.02, tilt: 0.55, scribble: 0, red: 1.00, green: 0.78, blue: 0.30, smile: 0)
-        case .lowBattery:
-            AgentFacePose(eyeW: 0.42, eyeH: 0.22, lookX: 0, lookY: 0.08, tilt: -0.45, scribble: 0, red: 0.96, green: 0.42, blue: 0.42, smile: 0)
-        case .sleepy:
-            // Chunky crisp horizontal bars straight from video 00:18!
-            AgentFacePose(eyeW: 0.46, eyeH: 0.18, lookX: 0, lookY: 0.05, tilt: 0, scribble: 0, red: 0.84, green: 0.84, blue: 0.96, smile: 0)
-        case .sleep:
-            AgentFacePose(eyeW: 0.44, eyeH: 0.06, lookX: 0, lookY: 0.10, tilt: 0, scribble: 0, red: 0.74, green: 0.74, blue: 0.90, smile: 0)
-        }
-    }
+struct SparkleParticle {
+    var x: CGFloat
+    var y: CGFloat
+    var vx: CGFloat
+    var vy: CGFloat
+    var size: CGFloat
+    var life: Double
+    var maxLife: Double
+    var color: Color
 }
 
-/// Critically damped spring following the target pose & discrete saccade target.
-/// No overshoot wobble, no continuous oscillation.
+struct SleepZParticle {
+    var x: CGFloat
+    var y: CGFloat
+    var vx: CGFloat
+    var vy: CGFloat
+    var life: Double
+    var maxLife: Double
+}
+
+/// Kept non-`@Published` so stepping inside `TimelineView` never triggers extra
+/// SwiftUI body invalidations.
 final class AgentFaceEngine: ObservableObject {
-    private(set) var pose: AgentFacePose
-    private var velocity = [CGFloat](repeating: 0, count: 10)
+    // Springs (critically damped — zero motion-sickness overshoot wobble)
+    var gazeX = FaceSpring(initial: 0, stiffness: 240, damping: 26)
+    var gazeY = FaceSpring(initial: 0, stiffness: 240, damping: 26)
+    var scaleX = FaceSpring(initial: 1, stiffness: 230, damping: 24)
+    var scaleY = FaceSpring(initial: 1, stiffness: 230, damping: 24)
+    var inwardTilt = FaceSpring(initial: 0, stiffness: 210, damping: 24)
+    var eyelidTop = FaceSpring(initial: 0, stiffness: 185, damping: 22)
+    var eyelidBottom = FaceSpring(initial: 0, stiffness: 210, damping: 22)
+    var blink = FaceSpring(initial: 0, stiffness: 460, damping: 28)
+    var mouthAmp = FaceSpring(initial: 0, stiffness: 180, damping: 20)
+    var penAlpha = FaceSpring(initial: 0, stiffness: 190, damping: 22)
+    var eyeSpacing = FaceSpring(initial: 18, stiffness: 210, damping: 22)
+    var eyeLiftY = FaceSpring(initial: 0, stiffness: 195, damping: 22)
+    var glowIntensity = FaceSpring(initial: 0, stiffness: 120, damping: 18)
+    var red = FaceSpring(initial: 0.90, stiffness: 160, damping: 22)
+    var green = FaceSpring(initial: 0.91, stiffness: 160, damping: 22)
+    var blue = FaceSpring(initial: 1.00, stiffness: 160, damping: 22)
+
+    // 3-Phase Working Scribble state
+    var scribbleProg: Double = 0
+    var scribblePhase: OrganicScribble.Phase = .writing
+    var scribblePhaseTime: Double = 0
+    var scribbleReturnT: Double = 0
+    var scribbleSeed1: Double = 1.0
+    var scribbleSeed2: Double = 1.55
+
+    // Particles
+    var sparkles: [SparkleParticle] = []
+    var sleepZs: [SleepZParticle] = []
+    private var nextSleepZAt: Double = 0.8
+    private var lastSparkleNonce: Int = 0
     private var lastTimestamp: TimeInterval?
+    private var elapsed: Double = 0
+    private var lastMood: AgentFaceMood = .idle
 
     init(initialMood: AgentFaceMood = .idle) {
-        self.pose = .target(initialMood)
+        self.lastMood = initialMood
+        if initialMood == .working {
+            penAlpha.value = 1; penAlpha.target = 1
+            eyeLiftY.value = -9; eyeLiftY.target = -9
+            eyeSpacing.value = 21; eyeSpacing.target = 21
+            inwardTilt.value = 0.17; inwardTilt.target = 0.17
+        }
     }
 
-    func step(
-        to mood: AgentFaceMood,
-        at timestamp: TimeInterval,
-        musicVibe: MusicVibe = .groove,
-        lookOverride: CGPoint = .zero,
-        tintOverride: (r: Double, g: Double, b: Double)? = nil
-    ) -> AgentFacePose {
-        let dt: CGFloat
-        if let last = lastTimestamp {
-            dt = CGFloat(min(max(timestamp - last, 0), 1.0 / 30.0))
-        } else {
-            dt = 0
-        }
+    func step(frame: AgentFaceFrameContext, at timestamp: TimeInterval) {
+        let rawDT = lastTimestamp.map { timestamp - $0 } ?? 0
         lastTimestamp = timestamp
+        let dt = min(max(rawDT, 0), 1.0 / 30.0)
+        elapsed += dt
+        let cgDT = CGFloat(dt)
 
-        var target = AgentFacePose.target(mood, musicVibe: musicVibe)
-        target.lookX += lookOverride.x
-        target.lookY += lookOverride.y
-        if let tint = tintOverride {
-            target.red = target.red * 0.6 + tint.r * 0.4
-            target.green = target.green * 0.6 + tint.g * 0.4
-            target.blue = target.blue * 0.6 + tint.b * 0.4
+        let mood = frame.mood
+        let reaction = frame.reaction?.reaction
+        let rAge = frame.reaction?.age ?? 0
+
+        // Reset scribble cleanly when entering `.working`.
+        if mood == .working && lastMood != .working {
+            scribbleProg = 0
+            scribblePhase = .writing
+            scribblePhaseTime = 0
+            scribbleReturnT = 0
+        }
+        if mood == .done && lastMood != .done {
+            spawnSparkles(count: 10, color: Color(red: 0.45, green: 0.95, blue: 0.66))
+        }
+        lastMood = mood
+
+        // Spawn sparkles on external Layer 3 / Shelf events.
+        if frame.sparkleNonce != lastSparkleNonce {
+            lastSparkleNonce = frame.sparkleNonce
+            let c = frame.sparkleColor
+            spawnSparkles(count: 10, color: Color(red: c.r, green: c.g, blue: c.b))
         }
 
-        var cur: [CGFloat] = [
-            pose.eyeW, pose.eyeH, pose.lookX, pose.lookY, pose.tilt,
-            pose.scribble, CGFloat(pose.red), CGFloat(pose.green), CGFloat(pose.blue), CGFloat(pose.smile)
-        ]
-        let tgt: [CGFloat] = [
-            target.eyeW, target.eyeH, target.lookX, target.lookY, target.tilt,
-            target.scribble, CGFloat(target.red), CGFloat(target.green), CGFloat(target.blue), CGFloat(target.smile)
-        ]
+        // 1. 3-Phase Working Scribble Engine (writing 1.32s -> pause 0.22s -> return arc 0.28s)
+        let spanHalf: CGFloat = 29
+        var penX: CGFloat = 0
+        var penY: CGFloat = 0
 
-        // Critically damped (c ≈ 2 * sqrt(k)): crisp snappy saccades with zero bounce wobble.
-        let stiffness: CGFloat = 180
-        let damping: CGFloat = 26
-        for i in cur.indices {
-            velocity[i] += (stiffness * (tgt[i] - cur[i]) - damping * velocity[i]) * dt
-            cur[i] += velocity[i] * dt
+        if mood == .working {
+            penAlpha.target = 1
+            let scribbleDur = 1.32
+            let pauseDur = 0.22
+            let returnDur = 0.28
+
+            switch scribblePhase {
+            case .writing:
+                scribblePhaseTime += dt
+                let p = min(1.0, scribblePhaseTime / scribbleDur)
+                scribbleProg = p
+                scribbleReturnT = 0
+                if p >= 1.0 {
+                    scribblePhase = .pause
+                    scribblePhaseTime = 0
+                }
+            case .pause:
+                scribblePhaseTime += dt
+                scribbleProg = 1.0
+                if scribblePhaseTime >= pauseDur {
+                    scribblePhase = .returning
+                    scribblePhaseTime = 0
+                    // Crisp left carriage-return saccade impulse.
+                    gazeX.impulse(-95)
+                }
+            case .returning:
+                scribblePhaseTime += dt
+                let rt = min(1.0, scribblePhaseTime / returnDur)
+                scribbleReturnT = rt
+                let ease = 1.0 - pow(1.0 - rt, 3.0)
+                scribbleProg = 1.0 - ease
+                if rt >= 1.0 {
+                    scribbleProg = 0
+                    scribbleReturnT = 0
+                    scribblePhase = .writing
+                    scribblePhaseTime = 0
+                    let h1 = FaceSaccade.hash01(Int(elapsed * 100) &+ 13)
+                    let h2 = FaceSaccade.hash01(Int(elapsed * 100) &+ 71)
+                    scribbleSeed1 = 0.86 + h1 * 0.34
+                    scribbleSeed2 = 1.15 + h2 * 0.65
+                }
+            }
+
+            penX = -spanHalf + CGFloat(scribbleProg) * (spanHalf * 2)
+            penY = OrganicScribble.sampleWave(u: scribbleProg, seed1: scribbleSeed1, seed2: scribbleSeed2)
+        } else {
+            penAlpha.target = 0
         }
 
-        pose = AgentFacePose(
-            eyeW: max(0.05, cur[0]),
-            eyeH: max(0.02, cur[1]),
-            lookX: cur[2],
-            lookY: cur[3],
-            tilt: min(max(cur[4], -1), 1),
-            scribble: min(max(cur[5], 0), 1),
-            red: Double(min(max(cur[6], 0), 1)),
-            green: Double(min(max(cur[7], 0), 1)),
-            blue: Double(min(max(cur[8], 0), 1)),
-            smile: Double(min(max(cur[9], 0), 1))
-        )
-        return pose
+        // 2. Sleep 'z' particles (calm upward drift, eyes stay 100% still)
+        if mood == .sleep {
+            if elapsed >= nextSleepZAt {
+                let jitter = FaceSaccade.hash01(Int(elapsed * 10) &+ 29)
+                sleepZs.append(
+                    SleepZParticle(
+                        x: 20 + CGFloat(jitter) * 8,
+                        y: -6,
+                        vx: 5.5 + CGFloat(jitter) * 3.5,
+                        vy: -12.5 - CGFloat(jitter) * 4.5,
+                        life: 0,
+                        maxLife: 1.85
+                    )
+                )
+                nextSleepZAt = elapsed + 1.0
+            }
+        }
+        for i in stride(from: sleepZs.count - 1, through: 0, by: -1) {
+            sleepZs[i].life += dt
+            sleepZs[i].x += sleepZs[i].vx * cgDT
+            sleepZs[i].y += sleepZs[i].vy * cgDT
+            if sleepZs[i].life >= sleepZs[i].maxLife {
+                sleepZs.remove(at: i)
+            }
+        }
+
+        // 3. Sparkle particles
+        for i in stride(from: sparkles.count - 1, through: 0, by: -1) {
+            sparkles[i].life += dt
+            sparkles[i].x += sparkles[i].vx * cgDT
+            sparkles[i].y += sparkles[i].vy * cgDT
+            sparkles[i].vy += 38 * cgDT
+            if sparkles[i].life >= sparkles[i].maxLife {
+                sparkles.remove(at: i)
+            }
+        }
+
+        // 4. Layer 1 Base Targets (steady poses — zero continuous bounce/sway!)
+        let grooveMult: Double = {
+            if frame.isMuted { return 0 }
+            if mood.isOnCall { return 0.2 }
+            if mood == .sleep { return 0.1 }
+            if mood == .sleepy { return 0.25 }
+            if mood == .working { return 0.35 }
+            return 1.0
+        }()
+
+        var tGazeX: CGFloat = 0
+        var tGazeY: CGFloat = 0
+        var tScaleX: CGFloat = 1.0
+        var tScaleY: CGFloat = 1.0
+        var tInward: CGFloat = 0
+        var tTopLid: CGFloat = 0
+        var tBotLid: CGFloat = 0
+        var tEyeSpacing: CGFloat = 18.5
+        var tEyeLiftY: CGFloat = 0
+        var tR: Double = 0.90, tG: Double = 0.91, tB: Double = 1.00
+
+        let isPlayingUnmuted = frame.musicListening && !frame.isMuted
+        let env = frame.audioEnvelope
+
+        // Vocal-reactive humming mouth when listening to Chill/Groove/Melancholy
+        let showHummingMouth = isPlayingUnmuted
+            && mood == .listening
+            && reaction == nil
+            && (frame.musicVibe == .groove || frame.musicVibe == .chill || frame.musicVibe == .melancholy)
+        mouthAmp.target = showHummingMouth
+            ? CGFloat(0.24 + env.envMid * 1.15 * grooveMult)
+            : 0
+        glowIntensity.target = isPlayingUnmuted
+            ? CGFloat(0.24 + env.envRms * 0.85 * grooveMult)
+            : 0
+
+        switch mood {
+        case .working:
+            tEyeSpacing = 21.5
+            tEyeLiftY = -9.5
+            let trackX = scribblePhase == .returning ? -spanHalf * 0.42 : penX * 0.44
+            tGazeX = trackX
+            tGazeY = 3.5 + (scribblePhase == .writing ? penY * 0.32 : -0.8)
+            tInward = 0.17
+            tTopLid = 0.08
+            tScaleX = 0.95
+            tScaleY = 0.94
+
+        case .idle:
+            if let gaze = frame.gaze {
+                tGazeX = gaze.x * 13.0
+                tGazeY = gaze.y * 6.5
+            } else if let switchX = frame.appSwitchLookX {
+                tGazeX = switchX * 70
+            } else if frame.isUserTyping {
+                tGazeX = 3.0
+                tGazeY = 4.0
+            } else {
+                let sac = FaceSaccade.discreteLook(at: timestamp, mood: .idle)
+                tGazeX = sac.x
+                tGazeY = sac.y
+            }
+
+        case .done:
+            tScaleX = 1.06
+            tScaleY = 0.95
+            tBotLid = 0.62 // Happy ^ ^ cheek-squint arch!
+            tR = 0.45; tG = 0.95; tB = 0.66
+
+        case .waiting:
+            let sac = FaceSaccade.discreteLook(at: timestamp, mood: .waiting)
+            tGazeX = sac.x
+            tGazeY = -2.0
+            tScaleX = 1.04
+            tScaleY = 1.12
+            tR = 1.00; tG = 0.86; tB = 0.22
+
+        case .meeting:
+            let sac = FaceSaccade.discreteLook(at: timestamp, mood: .meeting)
+            tGazeX = sac.x
+            tGazeY = -2.5
+            tScaleX = 1.02
+            tScaleY = 1.06
+            tR = 0.42; tG = 0.88; tB = 1.00
+
+        case .onCallCam, .onCallMic:
+            // Steady calm gaze, sleep locked out, music dampened 80%.
+            tScaleX = 0.98
+            tScaleY = 0.98
+            tTopLid = 0.06
+            tBotLid = 0.08
+            tR = 0.90; tG = 0.92; tB = 1.00
+
+        case .listening:
+            let sac = FaceSaccade.discreteLook(at: timestamp, mood: .listening)
+            tGazeX = frame.gaze.map { $0.x * 12.0 } ?? sac.x
+            tGazeY = frame.gaze.map { $0.y * 5.5 } ?? sac.y
+            tEyeLiftY = -4.0
+
+            switch frame.musicVibe {
+            case .chill:
+                tTopLid = min(0.42, 0.26 + CGFloat(env.envMid * 0.14))
+                tBotLid = 0.18 + CGFloat(env.envMid * 0.12)
+                tScaleX = 1.04
+                tScaleY = 0.88
+                tR = 0.86; tG = 0.84; tB = 0.98
+            case .melancholy:
+                tInward = -0.14
+                tTopLid = 0.22
+                tBotLid = 0.10
+                tScaleY = 0.92
+                tR = 0.62; tG = 0.76; tB = 0.98
+            case .groove:
+                tBotLid = 0.28 + CGFloat(env.envMid * 0.18)
+                tTopLid = 0.04
+                tR = 0.82; tG = 0.88; tB = 1.00
+            case .hype:
+                tInward = 0.08
+                tScaleX = 1.02
+                tScaleY = 1.04
+                tR = 0.96; tG = 0.62; tB = 0.96
+            case .rock:
+                tInward = 0.22
+                tTopLid = 0.18
+                tScaleX = 1.04
+                tR = 1.00; tG = 0.48; tB = 0.44
+            }
+
+            if let tint = frame.musicTint {
+                tR = tR * 0.55 + tint.r * 0.45
+                tG = tG * 0.55 + tint.g * 0.45
+                tB = tB * 0.55 + tint.b * 0.45
+            }
+
+        case .overheated:
+            tInward = -0.12
+            tTopLid = 0.26
+            tScaleY = 0.84
+            tR = 1.00; tG = 0.54; tB = 0.28
+
+        case .strained:
+            tInward = 0.14
+            tTopLid = 0.36
+            tBotLid = 0.22
+            tScaleX = 1.06
+            tScaleY = 0.72
+            tR = 1.00; tG = 0.78; tB = 0.30
+
+        case .lowBattery:
+            tInward = -0.10
+            tTopLid = 0.42
+            tScaleY = 0.74
+            tR = 0.96; tG = 0.42; tB = 0.42
+
+        case .sleepy:
+            // Clean chunky horizontal bars (never clipped by eyelids).
+            tGazeY = 3.0
+            tTopLid = 0
+            tBotLid = 0
+            tScaleX = 1.16
+            tScaleY = 0.24
+            tR = 0.84; tG = 0.84; tB = 0.96
+
+        case .sleep:
+            // Crisp visible `- -` sleeping bars + gentle drifting 'z' particles.
+            tGazeY = 4.0
+            tTopLid = 0
+            tBotLid = 0
+            tScaleX = 1.18
+            tScaleY = 0.14
+            tR = 0.78; tG = 0.80; tB = 0.95
+        }
+
+        // 5. Blink Target
+        var tBlink: CGFloat = 0
+        if reaction == .wake {
+            // 1.2s choreographed wake-up: `- -` closed -> stretch -> double-blink greeting -> smile
+            if rAge < 0.28 {
+                tScaleX = 1.18; tScaleY = 0.14; tTopLid = 0; tBotLid = 0
+            } else if rAge < 0.62 {
+                tScaleX = 0.92; tScaleY = 1.16; tTopLid = 0; tBotLid = 0
+            } else if rAge < 0.92 {
+                tBlink = ((rAge > 0.68 && rAge < 0.76) || (rAge > 0.81 && rAge < 0.89)) ? 1 : 0
+                tBotLid = 0.24
+            } else {
+                tBotLid = 0.36
+            }
+        } else if reaction != .failed && reaction != .poke && mood != .sleep {
+            tBlink = FaceSaccade.isBlinking(at: timestamp, mood: mood) ? 1 : 0
+        }
+
+        // 6. Layer 3 One-Shot Reaction Overrides
+        switch reaction {
+        case .airpods:
+            tScaleX = 1.10; tScaleY = 1.10; tBotLid = 0.36; tTopLid = 0
+            tR = 0.56; tG = 0.88; tB = 1.00
+        case .wifiLost:
+            tScaleX = 0.94; tScaleY = 0.88; tTopLid = 0.22; tInward = -0.14
+            tR = 0.98; tG = 0.78; tB = 0.28
+        case .wifiRestored:
+            tScaleX = 1.08; tScaleY = 1.04; tBotLid = 0.56; tTopLid = 0
+            tR = 0.36; tG = 0.92; tB = 0.68
+        case .mute:
+            tTopLid = 0.36; tBotLid = 0.14; tScaleY = 0.86
+        case .vol100:
+            tScaleX = 1.20; tScaleY = 1.22; tTopLid = 0; tBotLid = 0
+        case .charged:
+            tScaleX = 1.10; tScaleY = 1.12; tBotLid = 0.42; tTopLid = 0
+            tR = 0.36; tG = 0.96; tB = 0.56
+        case .poke:
+            tScaleX = 1.08; tScaleY = 0.96; tBotLid = 0.66; tTopLid = 0
+        case .trackSkip:
+            tGazeX = 14.0
+        case .trackChange:
+            tScaleX = 1.06; tScaleY = 1.08; tBotLid = 0.26
+        case .failed:
+            tR = 1.00; tG = 0.42; tB = 0.42
+        case .wake, .curious, .none:
+            break
+        }
+
+        // 7. Layer 2 Spatial Override — Drag-to-Shelf (highest gaze priority!)
+        if frame.drag.active {
+            tGazeX = frame.drag.offsetX * 15.0
+            tGazeY = frame.drag.offsetY * 9.0
+            let boost = 1.0 + frame.drag.proximity * 0.14
+            tScaleX *= boost
+            tScaleY *= boost
+            tTopLid = 0
+            tBotLid = 0
+            tInward = 0
+        }
+
+        // Commit targets & step all springs
+        gazeX.target = tGazeX
+        gazeY.target = tGazeY
+        scaleX.target = tScaleX
+        scaleY.target = tScaleY
+        inwardTilt.target = tInward
+        eyelidTop.target = tTopLid
+        eyelidBottom.target = tBotLid
+        blink.target = tBlink
+        eyeSpacing.target = tEyeSpacing
+        eyeLiftY.target = tEyeLiftY
+        red.target = CGFloat(tR)
+        green.target = CGFloat(tG)
+        blue.target = CGFloat(tB)
+
+        gazeX.update(dt: cgDT)
+        gazeY.update(dt: cgDT)
+        scaleX.update(dt: cgDT)
+        scaleY.update(dt: cgDT)
+        inwardTilt.update(dt: cgDT)
+        eyelidTop.update(dt: cgDT)
+        eyelidBottom.update(dt: cgDT)
+        blink.update(dt: cgDT)
+        mouthAmp.update(dt: cgDT)
+        penAlpha.update(dt: cgDT)
+        eyeSpacing.update(dt: cgDT)
+        eyeLiftY.update(dt: cgDT)
+        glowIntensity.update(dt: cgDT)
+        red.update(dt: cgDT)
+        green.update(dt: cgDT)
+        blue.update(dt: cgDT)
     }
 
-    func isSettled(for mood: AgentFaceMood, musicVibe: MusicVibe = .groove) -> Bool {
-        let target = AgentFacePose.target(mood, musicVibe: musicVibe)
-        let diffs: [CGFloat] = [
-            abs(pose.eyeW - target.eyeW),
-            abs(pose.eyeH - target.eyeH),
-            abs(pose.tilt - target.tilt),
-            abs(pose.scribble - target.scribble),
-            abs(CGFloat(pose.red - target.red)),
-            abs(CGFloat(pose.green - target.green)),
-            abs(CGFloat(pose.blue - target.blue)),
-            abs(CGFloat(pose.smile - target.smile))
-        ]
-        let maxDiff = diffs.max() ?? 0
-        let maxVel = velocity.map(abs).max() ?? 0
-        return maxDiff < 0.008 && maxVel < 0.015
+    func spawnSparkles(count: Int, color: Color) {
+        for i in 0..<count {
+            let frac = Double(i) / Double(max(1, count))
+            let h = FaceSaccade.hash01(Int(elapsed * 100) &+ i * 17)
+            let ang = frac * .pi * 2 + h * 0.5
+            let spd = 22.0 + h * 30.0
+            sparkles.append(
+                SparkleParticle(
+                    x: CGFloat((h - 0.5) * 32),
+                    y: CGFloat((FaceSaccade.hash01(i &+ 9) - 0.5) * 14),
+                    vx: CGFloat(cos(ang) * spd),
+                    vy: CGFloat(sin(ang) * spd - 10),
+                    size: CGFloat(1.8 + h * 1.8),
+                    life: 0,
+                    maxLife: 0.60 + h * 0.30,
+                    color: color
+                )
+            )
+        }
+    }
+
+    var areSpringsSettled: Bool {
+        gazeX.isSettled && gazeY.isSettled && scaleX.isSettled && scaleY.isSettled
+            && eyelidTop.isSettled && eyelidBottom.isSettled && inwardTilt.isSettled
+            && blink.isSettled && penAlpha.isSettled && sparkles.isEmpty
     }
 }
 
-// MARK: - Cursor Gaze Tracking
+// MARK: - Cursor Proximity Tracking (1.5s Stillness Auto-Reset)
 
 final class FaceTrackingNSView: NSView {
-    var onGazeChanged: ((CGPoint?) -> Void)?
+    var onGazeChanged: ((CGPoint?, Date) -> Void)?
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
-        let expanded = bounds.insetBy(dx: -110, dy: -48)
+        let expanded = bounds.insetBy(dx: -160, dy: -90)
         addTrackingArea(
             NSTrackingArea(
                 rect: expanded,
@@ -946,11 +1811,11 @@ final class FaceTrackingNSView: NSView {
         guard bounds.width > 0, bounds.height > 0 else { return }
         let nx = max(-1, min(1, ((loc.x / bounds.width) - 0.5) * 1.25))
         let ny = max(-1, min(1, (0.5 - (loc.y / bounds.height)) * 1.1))
-        onGazeChanged?(CGPoint(x: nx, y: ny))
+        onGazeChanged?(CGPoint(x: nx, y: ny), Date())
     }
 
     override func mouseExited(with event: NSEvent) {
-        onGazeChanged?(nil)
+        onGazeChanged?(nil, Date())
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -960,7 +1825,7 @@ final class FaceTrackingNSView: NSView {
 
 private struct FaceTrackingOverlay: NSViewRepresentable {
     let enabled: Bool
-    let onGazeChanged: (CGPoint?) -> Void
+    let onGazeChanged: (CGPoint?, Date) -> Void
 
     func makeNSView(context: Context) -> FaceTrackingNSView {
         let view = FaceTrackingNSView(frame: .zero)
@@ -971,7 +1836,7 @@ private struct FaceTrackingOverlay: NSViewRepresentable {
     func updateNSView(_ view: FaceTrackingNSView, context: Context) {
         view.onGazeChanged = enabled ? onGazeChanged : nil
         if !enabled {
-            onGazeChanged(nil)
+            onGazeChanged(nil, Date())
         }
     }
 }
@@ -981,14 +1846,18 @@ private struct FaceTrackingOverlay: NSViewRepresentable {
 struct AgentFaceFrameContext {
     var mood: AgentFaceMood
     var reaction: (reaction: AgentFaceReaction, age: TimeInterval)? = nil
+    var drag: FaceDragState = .inactive
+    var isMuted: Bool = false
     var musicListening: Bool = false
     var musicVibe: MusicVibe = .groove
     var musicMetrics: MusicAudioMetrics = .silent
+    var audioEnvelope: AsymmetricAudioEnvelope = AsymmetricAudioEnvelope()
     var musicTint: (r: Double, g: Double, b: Double)? = nil
     var gaze: CGPoint? = nil
     var isUserTyping: Bool = false
     var appSwitchLookX: CGFloat? = nil
-    var devActivity: String? = nil
+    var sparkleNonce: Int = 0
+    var sparkleColor: (r: Double, g: Double, b: Double) = (0.78, 0.82, 1.0)
 }
 
 struct AgentFaceCanvas: View {
@@ -1004,16 +1873,16 @@ struct AgentFaceCanvas: View {
     }
 
     private func frameInterval(for ctx: AgentFaceFrameContext) -> Double {
-        if ctx.reaction != nil || ctx.gaze != nil || !engine.isSettled(for: ctx.mood, musicVibe: ctx.musicVibe) {
+        if ctx.reaction != nil || ctx.drag.active || ctx.gaze != nil || !engine.areSpringsSettled {
             return 1.0 / 30.0
         }
         switch ctx.mood {
         case .working, .listening, .overheated:
             return 1.0 / 30.0
-        case .waiting, .done, .meeting, .strained, .idle, .sleepy, .lowBattery:
+        case .waiting, .done, .meeting, .onCallCam, .onCallMic, .strained, .idle, .sleepy, .lowBattery:
             return 1.0 / 20.0
         case .sleep:
-            return 1.0 / 8.0
+            return 1.0 / 12.0
         }
     }
 
@@ -1023,347 +1892,378 @@ struct AgentFaceCanvas: View {
             let now = timeline.date
             let t = now.timeIntervalSinceReferenceDate
             let frame = contextProvider(now)
-            let reaction = frame.reaction?.reaction
-
-            // Compute a STEADY discrete look target (cursor > skip > app switch > typing > saccade).
-            // All transitions go through the critically damped spring — zero sine-wave wobbling!
-            let targetLook: CGPoint = {
-                if let gaze = frame.gaze {
-                    return CGPoint(x: gaze.x * 0.17, y: gaze.y * 0.08)
-                }
-                if reaction == .trackSkip {
-                    return CGPoint(x: 0.18, y: 0)
-                }
-                if let switchX = frame.appSwitchLookX, frame.mood == .idle {
-                    return CGPoint(x: switchX, y: 0)
-                }
-                if frame.isUserTyping && (frame.mood == .idle || frame.mood == .sleepy) {
-                    // Gently look down toward what the user is typing (just like video 00:00–00:04!).
-                    return CGPoint(x: 0.04, y: 0.06)
-                }
-                return FaceSaccade.discreteLook(at: t, mood: frame.mood)
-            }()
-
-            let p = engine.step(
-                to: frame.mood,
-                at: t,
-                musicVibe: frame.musicVibe,
-                lookOverride: targetLook,
-                tintOverride: frame.mood == .listening ? listeningTint(for: frame) : nil
-            )
+            let _ = engine.step(frame: frame, at: t)
 
             Canvas { ctx, size in
-                let s = min(size.width, size.height)
-                guard s > 0 else { return }
+                let w = size.width
+                let h = size.height
+                guard w > 0, h > 0 else { return }
 
-                let reactionPulse = frame.reaction.map { max(0, 1 - ($0.age / $0.reaction.duration)) } ?? 0
-                let isPureMusic = frame.mood == .listening && reaction == nil
-                let vibe = frame.musicVibe
-                let audio = frame.musicMetrics
+                let cx = w / 2
+                let eyeCenterY = h * 0.44 + engine.eyeLiftY.value
+                let reaction = frame.reaction?.reaction
+                let isPureMusic = frame.mood == .listening && reaction == nil && !frame.isMuted
+                let eyeColor = Color(
+                    red: Double(min(max(engine.red.value, 0), 1)),
+                    green: Double(min(max(engine.green.value, 0), 1)),
+                    blue: Double(min(max(engine.blue.value, 0), 1))
+                )
 
-                var r = p.red, g = p.green, b = p.blue
-                if reaction == .failed {
-                    r = 1.0; g = 0.42; b = 0.42
-                } else if reaction == .charged {
-                    r = 0.36; g = 0.96; b = 0.56
+                // 1. Ambient Radial RMS Glow behind eyes (music-reactive without moving eyes!)
+                let glow = max(0, Double(engine.glowIntensity.value))
+                if glow > 0.02 {
+                    let radius = 26 + glow * 26
+                    let glowRect = CGRect(
+                        x: cx - radius,
+                        y: eyeCenterY - radius,
+                        width: radius * 2,
+                        height: radius * 2
+                    )
+                    ctx.fill(
+                        Path(ellipseIn: glowRect),
+                        with: .radialGradient(
+                            Gradient(colors: [
+                                eyeColor.opacity(min(0.34, glow * 0.34)),
+                                eyeColor.opacity(0)
+                            ]),
+                            center: CGPoint(x: cx, y: eyeCenterY),
+                            startRadius: 3,
+                            endRadius: radius
+                        )
+                    )
                 }
-                let color = Color(red: r, green: g, blue: b)
 
-                let blinking = reaction != .failed
-                    && reaction != .poke
-                    && FaceSaccade.isBlinking(at: t, mood: frame.mood)
-
-                // Eyes stay completely grounded at spring-smoothed (cx, cy) — ZERO bobbing!
-                let cx = size.width / 2 + p.lookX * s
-                let cy = size.height * 0.42 + p.lookY * s
-                let gap = s * (frame.mood == .strained ? 0.38 : 0.42)
-                let strokeW = max(1.7, s * 0.032)
-
-                // Draw Eyes with subtle 3D perspective when looking sideways (video 00:00–00:02!)
-                let turnRatio = min(max(p.lookX / 0.18, -1), 1)
+                // 2. Left (-1) & Right (+1) Eyes with 3D Spherical Foreshortening + Eyelids
+                let gx = engine.gazeX.value
+                let gy = engine.gazeY.value
+                let blinkVal = min(max(engine.blink.value, 0), 1)
+                let openY = max(0.08, 1.0 - blinkVal * 0.92)
+                let baseW: CGFloat = 15.2
+                let baseH: CGFloat = 26.2
+                let spacing = engine.eyeSpacing.value
+                let topLid = max(0, engine.eyelidTop.value)
+                let botLid = max(0, engine.eyelidBottom.value)
+                let lookRatio = max(-1, min(1, gx / 16.0))
 
                 for (index, side) in [-1.0, 1.0].enumerated() {
-                    let ex = cx + CGFloat(side) * gap / 2
-                    // Far eye narrows subtly when turning sideways for natural 3D depth.
-                    let perspectiveW: CGFloat = 1.0 - max(0, CGFloat(side) * turnRatio) * 0.14
-                    let perspectiveH: CGFloat = 1.0 - max(0, CGFloat(side) * turnRatio) * 0.06
+                    let sideF = CGFloat(side)
+                    let sphericalSide = sideF * lookRatio
+                    let depthScale = 1.0 + sphericalSide * 0.07
+                    let widthPersp = 1.0 + sphericalSide * 0.09 - (sphericalSide < 0 ? abs(sphericalSide) * 0.09 : 0)
 
-                    let baseW = p.eyeW * s * 0.62 * perspectiveW
-                    var baseH = p.eyeH * s * 0.62 * perspectiveH * (blinking ? 0.10 : 1)
+                    let ex = cx + gx + sideF * spacing * (1.0 - abs(lookRatio) * 0.05)
+                    let ey = eyeCenterY + gy
+                    let ew = baseW * engine.scaleX.value * widthPersp
+                    var eh = max(3.2, baseH * engine.scaleY.value * openY * depthScale)
 
                     if reaction == .curious {
-                        baseH *= (index == 0 ? 0.72 : 1.18)
-                    } else if reaction == .charged {
-                        baseH *= 1.12
+                        eh *= (index == 0 ? 0.74 : 1.16)
                     }
+
+                    var eyeCtx = ctx
+                    eyeCtx.translateBy(x: ex, y: ey)
+                    eyeCtx.rotate(by: .radians(Double(sideF * -engine.inwardTilt.value)))
 
                     if reaction == .failed {
                         // Expressive > < eyes for failed runs.
                         var chevron = Path()
-                        let hw = baseW * 0.52
-                        let hh = max(4.5, s * 0.12)
+                        let hw = ew * 0.45
+                        let hh: CGFloat = 8.5
                         if index == 0 {
-                            chevron.move(to: CGPoint(x: ex - hw, y: cy - hh))
-                            chevron.addLine(to: CGPoint(x: ex + hw, y: cy))
-                            chevron.addLine(to: CGPoint(x: ex - hw, y: cy + hh))
+                            chevron.move(to: CGPoint(x: -hw, y: -hh))
+                            chevron.addLine(to: CGPoint(x: hw, y: 0))
+                            chevron.addLine(to: CGPoint(x: -hw, y: hh))
                         } else {
-                            chevron.move(to: CGPoint(x: ex + hw, y: cy - hh))
-                            chevron.addLine(to: CGPoint(x: ex - hw, y: cy))
-                            chevron.addLine(to: CGPoint(x: ex + hw, y: cy + hh))
+                            chevron.move(to: CGPoint(x: hw, y: -hh))
+                            chevron.addLine(to: CGPoint(x: -hw, y: 0))
+                            chevron.addLine(to: CGPoint(x: hw, y: hh))
                         }
-                        ctx.stroke(
+                        eyeCtx.stroke(
                             chevron,
-                            with: .color(color),
-                            style: StrokeStyle(lineWidth: strokeW, lineCap: .round, lineJoin: .round)
+                            with: .color(eyeColor),
+                            style: StrokeStyle(lineWidth: 2.3, lineCap: .round, lineJoin: .round)
                         )
-                    } else if reaction == .poke || (frame.mood == .done && reaction == nil) {
-                        // Happy ^ ^ curved eyes when poked or agent finishes (`ok`).
-                        var arc = Path()
-                        let hw = baseW * 0.62
-                        arc.move(to: CGPoint(x: ex - hw, y: cy + s * 0.05))
-                        arc.addQuadCurve(
-                            to: CGPoint(x: ex + hw, y: cy + s * 0.05),
-                            control: CGPoint(x: ex, y: cy - s * 0.14)
-                        )
-                        ctx.stroke(
-                            arc,
-                            with: .color(color),
-                            style: StrokeStyle(lineWidth: strokeW * 1.15, lineCap: .round)
-                        )
-                    } else {
-                        // Draw tilted/expressive pill eye using GraphicsContext transform.
-                        // Working/Rock tilts inward (\ /), Melancholy/Overheated tilts outward (/ \).
-                        let angleDegrees = Double(p.tilt) * 14.0 * (index == 0 ? -1.0 : 1.0)
-                        var eyeCtx = ctx
-                        eyeCtx.translateBy(x: ex, y: cy)
-                        if !blinking && abs(angleDegrees) > 0.3 {
-                            eyeCtx.rotate(by: .degrees(angleDegrees))
-                        }
-                        let localRect = CGRect(x: -baseW / 2, y: -baseH / 2, width: baseW, height: baseH)
-                        eyeCtx.fill(
-                            Path(roundedRect: localRect, cornerRadius: min(baseW, baseH) / 2),
-                            with: .color(color)
-                        )
+                        continue
+                    }
 
-                        // Clean slanted eyelid trim for Rock (\ /) and Melancholy (/ \).
-                        if !blinking && baseH > 8 && abs(p.tilt) > 0.45 && frame.mood != .working {
-                            var lid = Path()
-                            let cutH = baseH * 0.30 * abs(p.tilt)
-                            let inwardDown = p.tilt > 0
-                            if (index == 0 && inwardDown) || (index == 1 && !inwardDown) {
-                                lid.move(to: CGPoint(x: localRect.minX - 2, y: localRect.minY - 2))
-                                lid.addLine(to: CGPoint(x: localRect.maxX + 2, y: localRect.minY - 2))
-                                lid.addLine(to: CGPoint(x: localRect.maxX + 2, y: localRect.minY + cutH))
-                                lid.closeSubpath()
-                            } else {
-                                lid.move(to: CGPoint(x: localRect.minX - 2, y: localRect.minY - 2))
-                                lid.addLine(to: CGPoint(x: localRect.maxX + 2, y: localRect.minY - 2))
-                                lid.addLine(to: CGPoint(x: localRect.minX - 2, y: localRect.minY + cutH))
-                                lid.closeSubpath()
-                            }
-                            eyeCtx.fill(lid, with: .color(.black))
-                        }
+                    // Pill eye body with soft glow
+                    let pillRect = CGRect(x: -ew / 2, y: -eh / 2, width: ew, height: eh)
+                    let pillPath = Path(roundedRect: pillRect, cornerRadius: min(ew, eh) * 0.48)
+                    eyeCtx.drawLayer { layerCtx in
+                        layerCtx.addFilter(.shadow(color: eyeColor.opacity(0.45), radius: 5, x: 0, y: 0))
+                        layerCtx.fill(pillPath, with: .color(eyeColor))
+                    }
+
+                    // Starry highlight glint during AirPods / Charged connect
+                    if reaction == .airpods || reaction == .charged {
+                        let glintRect = CGRect(x: -ew * 0.24, y: -eh * 0.28, width: 4.4, height: 4.4)
+                        eyeCtx.fill(Path(ellipseIn: glintRect), with: .color(.white))
+                    }
+
+                    // Top Eyelid Curtain (Working focus, Rock fierce, Sleepy/Sleep, Mute)
+                    if topLid > 0.02 {
+                        var lidCtx = eyeCtx
+                        let browAng: Double = (frame.mood == .working || (isPureMusic && frame.musicVibe == .rock))
+                            ? 0.17
+                            : (frame.mood == .overheated || (isPureMusic && frame.musicVibe == .melancholy) ? -0.15 : -0.06)
+                        lidCtx.rotate(by: .radians(Double(sideF) * browAng))
+                        let lidRect = CGRect(x: -ew, y: -eh / 2 - 5, width: ew * 2, height: eh * topLid * 1.10 + 5)
+                        lidCtx.fill(Path(lidRect), with: .color(.black))
+                    }
+
+                    // Bottom Cheek-Squint Arch (Pixar-style happy ^ ^ eyes!)
+                    if botLid > 0.03 {
+                        let r = ew * 0.88
+                        let archY = eh * 0.5 + r * (1.0 - botLid * 0.94)
+                        var arch = Path()
+                        arch.addArc(
+                            center: CGPoint(x: 0, y: archY),
+                            radius: r,
+                            startAngle: .degrees(180),
+                            endAngle: .degrees(0),
+                            clockwise: false
+                        )
+                        arch.addLine(to: CGPoint(x: ew, y: eh + 4))
+                        arch.addLine(to: CGPoint(x: -ew, y: eh + 4))
+                        arch.closeSubpath()
+                        eyeCtx.fill(arch, with: .color(.black))
                     }
                 }
 
-                // 1. Working Scribbling Nib Animation (exact signature motif from video 00:05–00:16!)
-                if p.scribble > 0.05 && reaction != .failed {
-                    drawScribblingNib(
+                // 3. Working Desk: 3-Phase Organic Multi-Harmonic Ink + Teardrop Quill Pen Nib
+                let penA = min(max(Double(engine.penAlpha.value), 0), 1)
+                if penA > 0.02 && reaction != .failed {
+                    drawOrganicScribbleAndQuill(
                         in: &ctx,
                         cx: cx,
-                        my: cy + s * 0.34,
-                        scale: s,
+                        deskY: min(h - 9, eyeCenterY + 33),
+                        alpha: penA,
                         t: t,
-                        alpha: Double(p.scribble),
-                        color: color
+                        color: eyeColor
                     )
                 }
 
-                // 2. Genre-Adaptive Music Mouth (steady eyes, expressive mouth!)
-                if isPureMusic {
-                    switch vibe {
-                    case .hype, .rock:
-                        // Crisp 5-bar mini equalizer mouth dancing cleanly to the live FFT bands
-                        // while the eyes remain 100% steady — expressive with zero motion sickness!
-                        drawMiniEqualizerMouth(
+                // 4. Music Mouth: Vocal Humming Wave (Ballad/Chill/Groove) or 5-Bar Mini EQ (Hype/Rock)
+                if isPureMusic && (frame.musicVibe == .hype || frame.musicVibe == .rock) {
+                    drawMiniEqualizerMouth(
+                        in: &ctx,
+                        cx: cx,
+                        my: eyeCenterY + 23,
+                        bands: frame.musicMetrics.bands,
+                        color: eyeColor
+                    )
+                } else {
+                    let mAmp = max(0, CGFloat(engine.mouthAmp.value))
+                    if mAmp > 0.03 && reaction != .failed {
+                        drawVocalHummingMouth(
                             in: &ctx,
                             cx: cx,
-                            my: cy + s * 0.33,
-                            scale: s,
-                            bands: audio.bands,
-                            color: color
-                        )
-                    case .groove, .chill:
-                        let mw = s * (vibe == .chill ? 0.22 : 0.28)
-                        let my = cy + s * 0.29
-                        let depth = vibe == .chill ? 0.07 : 0.115
-                        var smile = Path()
-                        smile.move(to: CGPoint(x: cx - mw / 2, y: my))
-                        smile.addQuadCurve(
-                            to: CGPoint(x: cx + mw / 2, y: my),
-                            control: CGPoint(x: cx, y: my + s * CGFloat(depth))
-                        )
-                        ctx.stroke(
-                            smile,
-                            with: .color(color.opacity(vibe == .chill ? 0.65 : 0.90)),
-                            style: StrokeStyle(lineWidth: max(1.5, s * 0.028), lineCap: .round)
-                        )
-                    case .melancholy:
-                        let mw = s * 0.18
-                        let my = cy + s * 0.32
-                        var wistful = Path()
-                        wistful.move(to: CGPoint(x: cx - mw / 2, y: my))
-                        wistful.addQuadCurve(
-                            to: CGPoint(x: cx + mw / 2, y: my),
-                            control: CGPoint(x: cx, y: my - s * 0.028)
-                        )
-                        ctx.stroke(
-                            wistful,
-                            with: .color(color.opacity(0.65)),
-                            style: StrokeStyle(lineWidth: max(1.4, s * 0.025), lineCap: .round)
+                            baseY: eyeCenterY + 22,
+                            amp: mAmp,
+                            t: t,
+                            color: eyeColor
                         )
                     }
-                } else if reaction == .poke || reaction == .charged || (frame.mood == .done && reaction == nil) {
-                    let strength = frame.mood == .done ? 1.0 : reactionPulse
-                    let mw = s * 0.26
-                    let my = cy + s * 0.28
-                    var smile = Path()
-                    smile.move(to: CGPoint(x: cx - mw / 2, y: my))
-                    smile.addQuadCurve(
-                        to: CGPoint(x: cx + mw / 2, y: my),
-                        control: CGPoint(x: cx, y: my + s * 0.11 * CGFloat(strength))
-                    )
-                    ctx.stroke(
-                        smile,
-                        with: .color(color.opacity(strength)),
-                        style: StrokeStyle(lineWidth: max(1.5, s * 0.028), lineCap: .round)
-                    )
-                } else if reaction == .failed {
-                    let mw = s * 0.20
-                    let my = cy + s * 0.32
-                    var frown = Path()
-                    frown.move(to: CGPoint(x: cx - mw / 2, y: my))
-                    frown.addQuadCurve(
-                        to: CGPoint(x: cx + mw / 2, y: my),
-                        control: CGPoint(x: cx, y: my - s * 0.07)
-                    )
-                    ctx.stroke(
-                        frown,
-                        with: .color(color.opacity(0.9)),
-                        style: StrokeStyle(lineWidth: max(1.5, s * 0.028), lineCap: .round)
-                    )
                 }
 
-                // 3. Overheated micro-cue: single slow teardrop sweat bead beside right eye.
+                // 5. Overheated sweat bead
                 if frame.mood == .overheated {
                     let phase = t.truncatingRemainder(dividingBy: 2.0) / 2.0
-                    let dropX = cx + gap / 2 + s * 0.22
-                    let dropY = cy - s * 0.14 + CGFloat(phase) * s * 0.24
+                    let dropX = cx + spacing + 13
+                    let dropY = eyeCenterY - 10 + CGFloat(phase) * 16
                     let alpha = sin(phase * .pi)
-                    let drop = CGRect(x: dropX - 2.2, y: dropY - 3.2, width: 4.4, height: 6.4)
+                    let drop = CGRect(x: dropX - 2, y: dropY - 3, width: 4, height: 6)
                     ctx.fill(
                         Path(ellipseIn: drop),
                         with: .color(Color(red: 0.52, green: 0.86, blue: 1.0).opacity(alpha * 0.9))
                     )
                 }
 
-                // 4. Sleeping micro-cue: two calm drifting "z" specks (eyes stay completely still).
-                if frame.mood == .sleep {
-                    for idx in 0..<2 {
-                        let phase = (t * 0.28 + Double(idx) * 0.5).truncatingRemainder(dividingBy: 1.0)
-                        let zx = cx + gap * 0.60 + CGFloat(phase) * s * 0.10
-                        let zy = cy - s * 0.10 - CGFloat(phase) * s * 0.20
-                        let alpha = sin(phase * .pi) * 0.60
-                        let zSize: CGFloat = idx == 0 ? 5.5 : 4.2
-                        var zPath = Path()
-                        zPath.move(to: CGPoint(x: zx - zSize / 2, y: zy - zSize / 2))
-                        zPath.addLine(to: CGPoint(x: zx + zSize / 2, y: zy - zSize / 2))
-                        zPath.addLine(to: CGPoint(x: zx - zSize / 2, y: zy + zSize / 2))
-                        zPath.addLine(to: CGPoint(x: zx + zSize / 2, y: zy + zSize / 2))
-                        ctx.stroke(
-                            zPath,
-                            with: .color(color.opacity(alpha)),
-                            style: StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round)
-                        )
+                // 6. Sleep Floating 'z' Particles
+                for z in engine.sleepZs {
+                    let u = z.life / z.maxLife
+                    let alpha = u < 0.2 ? (u / 0.2) : max(0, 1.0 - (u - 0.2) / 0.8)
+                    let fontSize = 9.0 + u * 4.5
+                    let text = Text("z")
+                        .font(.system(size: fontSize, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color(red: 0.65, green: 0.71, blue: 0.99).opacity(alpha * 0.85))
+                    ctx.draw(text, at: CGPoint(x: cx + z.x, y: eyeCenterY + z.y))
+                }
+
+                // 7. Layer 3 Floating Badges (AirPods / Wi-Fi '?' / Mute)
+                if reaction == .airpods || reaction == .wifiLost || reaction == .mute {
+                    let bx = cx + 44
+                    let by = eyeCenterY - 10
+                    let badgeRect = CGRect(x: bx - 9.5, y: by - 9.5, width: 19, height: 19)
+                    ctx.fill(Path(ellipseIn: badgeRect), with: .color(.white.opacity(0.14)))
+
+                    let symbol: String
+                    let tint: Color
+                    switch reaction {
+                    case .wifiLost:
+                        symbol = "?"
+                        tint = Color(red: 0.98, green: 0.75, blue: 0.14)
+                    case .airpods:
+                        symbol = "♪"
+                        tint = Color(red: 0.22, green: 0.74, blue: 0.97)
+                    default:
+                        symbol = "×"
+                        tint = Color(red: 0.98, green: 0.44, blue: 0.52)
                     }
+                    let label = Text(symbol)
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(tint)
+                    ctx.draw(label, at: CGPoint(x: bx, y: by))
+                }
+
+                // 8. Sparkle Burst Particles
+                for sp in engine.sparkles {
+                    let u = sp.life / sp.maxLife
+                    let alpha = max(0, 1.0 - u)
+                    let radius = sp.size * CGFloat(1.0 - u * 0.4)
+                    let dot = CGRect(
+                        x: cx + sp.x - radius,
+                        y: eyeCenterY + sp.y - radius,
+                        width: radius * 2,
+                        height: radius * 2
+                    )
+                    ctx.fill(Path(ellipseIn: dot), with: .color(sp.color.opacity(alpha)))
                 }
             }
         }
     }
 
-    /// Draws the signature writing/scribbling pen-nib leaving a crisp wavy ink trail
-    /// from left to right (matching the reference video 00:05–00:16).
-    private func drawScribblingNib(
+    private func drawOrganicScribbleAndQuill(
         in ctx: inout GraphicsContext,
         cx: CGFloat,
-        my: CGFloat,
-        scale s: CGFloat,
-        t: TimeInterval,
+        deskY: CGFloat,
         alpha: Double,
+        t: TimeInterval,
         color: Color
     ) {
-        let cycle = 2.6
-        let phase = t.truncatingRemainder(dividingBy: cycle) / cycle
-        // 0.00..0.75: scribble left -> right; 0.75..1.00: hold & fade cleanly before next stroke.
-        let progress = min(1.0, phase / 0.75)
-        let fade = phase < 0.75 ? 1.0 : max(0, 1.0 - (phase - 0.75) / 0.25)
-        let strokeAlpha = alpha * fade
+        let spanX: CGFloat = 58
+        let startX = cx - spanX / 2
+        let prog = max(0, min(1, engine.scribbleProg))
+        let isReturn = engine.scribblePhase == .returning
+        let isPause = engine.scribblePhase == .pause
+        let inkFade = isReturn ? max(0, 1.0 - engine.scribbleReturnT * 1.25) : 1.0
 
-        let lineW = s * 0.44
-        let startX = cx - lineW / 2
-        let headX = startX + lineW * CGFloat(progress)
-        let steps = max(2, Int(progress * 36))
+        // Organic Multi-Harmonic Ink Trail
+        if inkFade > 0.02 && (isReturn || prog > 0.01) {
+            let samples = 48
+            let startFrac = isReturn ? engine.scribbleReturnT * 0.45 : 0.0
+            let endFrac = isReturn ? 1.0 : prog
+            let minI = Int(floor(Double(samples) * startFrac))
+            let maxI = Int(floor(Double(samples) * endFrac))
 
-        var trail = Path()
-        for i in 0...steps {
-            let u = Double(i) / 36.0
-            let x = startX + lineW * CGFloat(u)
-            let y = my + CGFloat(sin(u * .pi * 6.0)) * s * 0.026
-            if i == 0 {
-                trail.move(to: CGPoint(x: x, y: y))
-            } else {
-                trail.addLine(to: CGPoint(x: x, y: y))
+            if maxI > minI {
+                var trail = Path()
+                for i in minI...maxI {
+                    let u = Double(i) / Double(samples)
+                    let px = startX + CGFloat(u) * spanX
+                    let py = deskY + OrganicScribble.sampleWave(u: u, seed1: engine.scribbleSeed1, seed2: engine.scribbleSeed2)
+                    if i == minI {
+                        trail.move(to: CGPoint(x: px, y: py))
+                    } else {
+                        trail.addLine(to: CGPoint(x: px, y: py))
+                    }
+                }
+                ctx.stroke(
+                    trail,
+                    with: .color(color.opacity(alpha * 0.9 * inkFade)),
+                    style: StrokeStyle(lineWidth: 2.1, lineCap: .round, lineJoin: .round)
+                )
             }
         }
-        ctx.stroke(
-            trail,
-            with: .color(color.opacity(strokeAlpha * 0.85)),
-            style: StrokeStyle(lineWidth: max(1.4, s * 0.024), lineCap: .round, lineJoin: .round)
-        )
 
-        // Tilted glowing stylus/nib droplet at the leading tip of the stroke.
-        let headY = my + CGFloat(sin(progress * .pi * 6.0)) * s * 0.026
+        // True Teardrop Quill Pen Nib with Parabolic Return Arc + Subtle Wrist Jitter
+        let tipX = startX + CGFloat(prog) * spanX
+        let waveY = OrganicScribble.sampleWave(u: prog, seed1: engine.scribbleSeed1, seed2: engine.scribbleSeed2)
+        let liftY: CGFloat = {
+            if isPause { return -3.2 }
+            if isReturn { return CGFloat(-sin(engine.scribbleReturnT * .pi) * 12.5) }
+            return 0
+        }()
+        let tipY = deskY + (isReturn ? 0 : waveY) + liftY
+        let wristJitter: Double = {
+            if engine.scribblePhase == .writing {
+                return sin(t * 28) * 0.10 + cos(t * 17) * 0.04
+            }
+            return isReturn ? -0.18 : 0.04
+        }()
+
         var nibCtx = ctx
-        nibCtx.translateBy(x: headX + s * 0.035, y: headY - s * 0.045)
-        nibCtx.rotate(by: .degrees(32))
-        let nibW = s * 0.075
-        let nibH = s * 0.145
-        let nibRect = CGRect(x: -nibW / 2, y: -nibH / 2, width: nibW, height: nibH)
-        nibCtx.fill(
-            Path(roundedRect: nibRect, cornerRadius: nibW / 2),
-            with: .color(color.opacity(strokeAlpha))
+        nibCtx.translateBy(x: tipX, y: tipY)
+        nibCtx.rotate(by: .radians(0.66 + wristJitter))
+
+        var quill = Path()
+        quill.move(to: .zero)
+        quill.addCurve(
+            to: CGPoint(x: 0, y: -14.8),
+            control1: CGPoint(x: -4.8, y: -4.6),
+            control2: CGPoint(x: -4.5, y: -12.3)
+        )
+        quill.addCurve(
+            to: .zero,
+            control1: CGPoint(x: 4.5, y: -12.3),
+            control2: CGPoint(x: 4.8, y: -4.6)
+        )
+        quill.closeSubpath()
+        nibCtx.fill(quill, with: .color(color.opacity(alpha)))
+
+        // Quill nib center slit detail
+        var slit = Path()
+        slit.move(to: CGPoint(x: 0, y: -1.0))
+        slit.addLine(to: CGPoint(x: 0, y: -6.5))
+        nibCtx.stroke(
+            slit,
+            with: .color(Color.black.opacity(0.60 * alpha)),
+            style: StrokeStyle(lineWidth: 1.0, lineCap: .round)
         )
     }
 
-    /// Draws a compact, grounded 5-bar equalizer mouth for Hype/Rock tracks
-    /// so music feels alive while the eyes stay steady.
+    private func drawVocalHummingMouth(
+        in ctx: inout GraphicsContext,
+        cx: CGFloat,
+        baseY: CGFloat,
+        amp: CGFloat,
+        t: TimeInterval,
+        color: Color
+    ) {
+        let halfSpan = 19 + amp * 5.5
+        let waveH = 1.4 + amp * 5.5
+        var wave = Path()
+        let steps = 32
+        for i in 0...steps {
+            let u = Double(i) / Double(steps)
+            let x = cx - halfSpan + CGFloat(u) * halfSpan * 2
+            let win = sin(u * .pi)
+            let yOff = (sin(u * .pi * 4 - t * 9.5) * 0.72 + sin(u * .pi * 8 + t * 13) * 0.28) * Double(waveH) * win
+            let pt = CGPoint(x: x, y: baseY + CGFloat(yOff))
+            if i == 0 { wave.move(to: pt) } else { wave.addLine(to: pt) }
+        }
+        ctx.stroke(
+            wave,
+            with: .color(color.opacity(min(1, Double(amp) * 1.15))),
+            style: StrokeStyle(lineWidth: 2.0, lineCap: .round, lineJoin: .round)
+        )
+    }
+
     private func drawMiniEqualizerMouth(
         in ctx: inout GraphicsContext,
         cx: CGFloat,
         my: CGFloat,
-        scale s: CGFloat,
         bands: [Double],
         color: Color
     ) {
         let count = 5
-        let barW = max(2.2, s * 0.036)
-        let spacing = barW * 1.45
+        let barW: CGFloat = 2.6
+        let spacing: CGFloat = 4.2
         let totalW = CGFloat(count - 1) * spacing
-        let maxH = s * 0.16
+        let maxH: CGFloat = 11.5
 
         for i in 0..<count {
             let level = i < bands.count ? bands[i] : 0.2
-            // Taper outer bars slightly so it forms a pleasing smile-like silhouette.
             let envelope = 1.0 - abs(Double(i) - 2.0) * 0.18
             let h = max(barW, CGFloat(level * envelope) * maxH + barW)
             let x = cx - totalW / 2 + CGFloat(i) * spacing
@@ -1374,35 +2274,22 @@ struct AgentFaceCanvas: View {
             )
         }
     }
-
-    private func listeningTint(for frame: AgentFaceFrameContext) -> (r: Double, g: Double, b: Double)? {
-        if let albumTint = frame.musicTint {
-            return albumTint
-        }
-        switch frame.musicVibe {
-        case .chill:      return (0.86, 0.84, 0.98)
-        case .groove:     return (0.82, 0.88, 1.00)
-        case .hype:       return (0.96, 0.62, 0.96)
-        case .rock:       return (1.00, 0.48, 0.44)
-        case .melancholy: return (0.62, 0.76, 0.98)
-        }
-    }
 }
 
 // MARK: - Dropped Chin Container & Unified Mac Companion View
 
-/// Full procedural face sitting in a dropped chin directly below the camera cutout.
 struct AgentFaceDroppedChinView: View {
     let cameraWidth: CGFloat
     let cameraHeight: CGFloat
     let meetingBadge: UpcomingMeetingCue?
+    let onCallDotColor: Color?
     let trackCursor: Bool
-    let onGazeChanged: (CGPoint?) -> Void
+    let onGazeChanged: (CGPoint?, Date) -> Void
     let onMeetingTap: ((UpcomingMeetingCue) -> Void)?
     let contextProvider: (Date) -> AgentFaceFrameContext
 
-    static let faceHeight: CGFloat = 72
-    static let faceWidth: CGFloat = 132
+    static let faceHeight: CGFloat = 76
+    static let faceWidth: CGFloat = 144
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1434,6 +2321,16 @@ struct AgentFaceDroppedChinView: View {
                     .help("\(meetingBadge.title) · Click to join")
                 }
             }
+            .overlay(alignment: .topTrailing) {
+                if let onCallDotColor {
+                    Circle()
+                        .fill(onCallDotColor)
+                        .frame(width: 6.5, height: 6.5)
+                        .shadow(color: onCallDotColor.opacity(0.85), radius: 4)
+                        .padding(.top, 4)
+                        .padding(.trailing, 8)
+                }
+            }
             .overlay {
                 FaceTrackingOverlay(enabled: trackCursor, onGazeChanged: onGazeChanged)
             }
@@ -1441,8 +2338,7 @@ struct AgentFaceDroppedChinView: View {
     }
 }
 
-/// Unified closed-notch Mac companion face reacting to Dev agents, Music,
-/// Calendar, Notifications, System health, user activity, and cursor gaze.
+/// Unified closed-notch Mac companion face reacting across all 3 layers.
 struct DevAgentFaceLiveActivity: View {
     @EnvironmentObject private var vm: BoringViewModel
     @ObservedObject private var devStore = DevActivityStore.shared
@@ -1457,21 +2353,30 @@ struct DevAgentFaceLiveActivity: View {
     let cameraHeight: CGFloat
 
     @State private var gaze: CGPoint?
+    @State private var lastGazeMoveAt = Date.distantPast
 
     var body: some View {
         let now = Date()
         let meeting = reactToCalendar
             ? MacFaceInputs.upcomingMeeting(from: calendar.events, now: now)
             : nil
+        let onCallColor: Color? = {
+            guard reactToSystem else { return nil }
+            if observer.isCameraActive { return Color(red: 0.29, green: 0.87, blue: 0.50) }
+            if observer.isMicActive { return Color(red: 0.98, green: 0.57, blue: 0.24) }
+            return nil
+        }()
 
         AgentFaceDroppedChinView(
             cameraWidth: vm.closedNotchSize.width,
             cameraHeight: cameraHeight,
             meetingBadge: meeting,
+            onCallDotColor: onCallColor,
             trackCursor: trackCursor,
-            onGazeChanged: { point in
+            onGazeChanged: { point, when in
                 gaze = point
                 if point != nil {
+                    lastGazeMoveAt = when
                     observer.noteActivity()
                 }
             },
@@ -1491,6 +2396,8 @@ struct DevAgentFaceLiveActivity: View {
                     reactToMusic: reactToMusic,
                     upcomingMeeting: liveMeeting,
                     reactToCalendar: reactToCalendar,
+                    isCameraActive: observer.isCameraActive,
+                    isMicActive: observer.isMicActive,
                     thermalState: observer.thermalState,
                     isMemoryPressured: observer.isMemoryPressured,
                     batteryPercentage: observer.batteryPercentage,
@@ -1503,22 +2410,28 @@ struct DevAgentFaceLiveActivity: View {
                 let mood = inputs.resolveMood()
                 let isVibing = reactToMusic && music.isPlaying
                 let t = date.timeIntervalSinceReferenceDate
-                let (musicMetrics, musicVibe) = observer.sampleAudioMetrics(at: t, isPlaying: isVibing)
+                let (musicMetrics, audioEnv, musicVibe) = observer.sampleAudioMetrics(at: t, isPlaying: isVibing)
                 let musicTint = resolvedMusicTint(isVibing: isVibing)
                 let reaction = resolvedReaction(at: date)
-                let activeDevActivity = devStore.items.first(where: { $0.status == .run })?.activity
+
+                // 1.5s stillness auto-reset on idle proximity cursor gaze.
+                let freshGaze: CGPoint? = (trackCursor && date.timeIntervalSince(lastGazeMoveAt) < 1.5) ? gaze : nil
 
                 return AgentFaceFrameContext(
                     mood: mood,
                     reaction: reaction,
+                    drag: observer.dragState,
+                    isMuted: observer.isAudioMuted,
                     musicListening: isVibing,
                     musicVibe: musicVibe,
                     musicMetrics: musicMetrics,
+                    audioEnvelope: audioEnv,
                     musicTint: musicTint,
-                    gaze: trackCursor ? gaze : nil,
+                    gaze: freshGaze,
                     isUserTyping: observer.isUserActivelyTyping(at: date),
                     appSwitchLookX: observer.appSwitchLookX(at: date),
-                    devActivity: activeDevActivity
+                    sparkleNonce: observer.sparkleEventNonce,
+                    sparkleColor: observer.lastSparkleColor
                 )
             }
         )
@@ -1561,8 +2474,8 @@ struct IdleAgentFaceView: View {
 
 /// Legacy preview/component wrapper kept for source compatibility.
 struct AnimatedFace: View {
-    var height: CGFloat = 72
-    var width: CGFloat = 128
+    var height: CGFloat = 76
+    var width: CGFloat = 144
     var mood: AgentFaceMood = .idle
 
     var body: some View {
@@ -1574,7 +2487,7 @@ struct AnimatedFace: View {
 #Preview {
     ZStack {
         Color.black
-        AnimatedFace(height: 72, width: 128, mood: .working)
+        AnimatedFace(height: 76, width: 144, mood: .working)
     }
     .frame(width: 220, height: 110)
 }

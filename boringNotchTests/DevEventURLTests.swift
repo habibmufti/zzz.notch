@@ -150,13 +150,32 @@ final class DevEventURLTests: XCTestCase {
         var t: TimeInterval = 0
         for _ in 0..<90 {
             t += 1.0 / 30.0
-            _ = engine.step(to: .working, at: t)
+            engine.step(frame: AgentFaceFrameContext(mood: .working), at: t)
         }
-        let target = AgentFacePose.target(.working)
-        XCTAssertEqual(engine.pose.eyeH, target.eyeH, accuracy: 0.01)
-        XCTAssertEqual(engine.pose.scribble, target.scribble, accuracy: 0.01)
-        XCTAssertEqual(engine.pose.tilt, target.tilt, accuracy: 0.01)
-        XCTAssertTrue(engine.isSettled(for: .working))
+        XCTAssertEqual(engine.penAlpha.value, 1.0, accuracy: 0.02)
+        XCTAssertEqual(engine.inwardTilt.value, 0.17, accuracy: 0.02)
+    }
+
+    func testAsymmetricAudioEnvelopeAttacksFastAndReleasesSlow() {
+        var env = AsymmetricAudioEnvelope()
+        env.update(rawBass: 1.0, rawMid: 0.8, rawHigh: 0.6, dt: 0.03)
+        XCTAssertGreaterThan(env.envBass, 0.55)
+        let peak = env.envBass
+        env.update(rawBass: 0.0, rawMid: 0.0, rawHigh: 0.0, dt: 0.03)
+        // Slow release (220ms) keeps most of the envelope after 30ms.
+        XCTAssertGreaterThan(env.envBass, peak * 0.80)
+    }
+
+    func testFaceDragStateComputesProximityAndClampedOffset() {
+        let center = CGPoint(x: 720, y: 900)
+        let near = FaceDragState.from(globalPoint: CGPoint(x: 750, y: 880), notchCenter: center)
+        XCTAssertTrue(near.active)
+        XCTAssertGreaterThan(near.proximity, 0.85)
+        XCTAssertGreaterThan(near.offsetX, 0)
+
+        let far = FaceDragState.from(globalPoint: CGPoint(x: 100, y: 200), notchCenter: center)
+        XCTAssertEqual(far.proximity, 0, accuracy: 0.001)
+        XCTAssertEqual(far.offsetX, -1, accuracy: 0.001)
     }
 
     func testMacFaceInputsResolvesCrossModulePriorityOrder() {

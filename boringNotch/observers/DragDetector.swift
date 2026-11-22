@@ -17,6 +17,7 @@ final class DragDetector {
     var onDragEntersNotchRegion: VoidCallback?
     var onDragExitsNotchRegion: VoidCallback?
     var onDragMove: PositionCallback?
+    var onDragEnd: VoidCallback?
 
     private var mouseDownMonitor: Any?
     private var mouseDraggedMonitor: Any?
@@ -96,10 +97,14 @@ final class DragDetector {
             guard let self = self else { return }
             guard self.isDragging else { return }
 
+            let wasContentDragging = self.isContentDragging
             self.isDragging = false
             self.isContentDragging = false
             self.hasEnteredNotchRegion = false
             self.pasteboardChangeCount = -1
+            if wasContentDragging {
+                self.onDragEnd?()
+            }
         }
     }
 
