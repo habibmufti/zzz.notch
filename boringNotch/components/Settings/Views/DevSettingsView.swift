@@ -34,7 +34,23 @@ struct DevSettingsView: View {
                         Text(style.title).tag(style)
                     }
                 }
-                if liveActivityStyle == .mascots {
+                if liveActivityStyle == .face {
+                    Defaults.Toggle(key: .faceShowWhenIdle) {
+                        Text("Always show face when idle")
+                    }
+                    Defaults.Toggle(key: .devMascotMusic) {
+                        Text("React to music")
+                    }
+                    Defaults.Toggle(key: .faceReactCalendar) {
+                        Text("React to upcoming meetings")
+                    }
+                    Defaults.Toggle(key: .faceReactSystem) {
+                        Text("React to thermal, memory, and battery alerts")
+                    }
+                    Defaults.Toggle(key: .faceTrackCursor) {
+                        Text("Track cursor with eyes")
+                    }
+                } else {
                     Defaults.Toggle(key: .devMascotMusic) {
                         Text("React to music")
                     }
@@ -50,7 +66,7 @@ struct DevSettingsView: View {
             } footer: {
                 Text(liveActivityStyle == .mascots
                     ? "Music reactions show headphones and bobbing while music plays. Clicking a mascot always pokes it; the controls add play/pause on click and skip on double-click."
-                    : liveActivityStyle.summary)
+                    : "The face represents your Mac in the closed notch — reacting live to agents, music, imminent meetings, notifications, and event-driven system alerts with zero background polling.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

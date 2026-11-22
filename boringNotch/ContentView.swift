@@ -22,6 +22,7 @@ struct ContentView: View {
     @ObservedObject var volumeManager = VolumeManager.shared
     @ObservedObject var notificationManager = SystemNotificationManager.shared
     @ObservedObject var devActivity = DevActivityStore.shared
+    @ObservedObject var faceObserver = MacFaceObserver.shared
     /// Which entry of the closed-notch activity stack is on top.
     @State private var activityIndex: Int = 0
     @State private var hoverTask: Task<Void, Never>?
@@ -40,6 +41,7 @@ struct ContentView: View {
     @Default(.showNotHumanFace) var showNotHumanFace
     @Default(.devFullscreenMode) var devFullscreenMode
     @Default(.devLiveActivityStyle) var devLiveActivityStyle
+    @Default(.faceShowWhenIdle) var faceShowWhenIdle
 
     // Use standardized animations from StandardAnimations enum
     private let animationSpring = StandardAnimations.interactive
@@ -116,7 +118,11 @@ struct ContentView: View {
         guard vm.isAnyFullscreen else { return true }
         switch devFullscreenMode {
         case .show, .dim: return true
-        case .urgentOnly: return devActivity.items.contains { $0.status == .wait }
+        case .urgentOnly:
+            if devLiveActivityStyle == .face {
+                return faceObserver.hasUrgentSignal()
+            }
+            return devActivity.items.contains { $0.status == .wait }
         case .hide: return false
         }
     }
@@ -133,7 +139,21 @@ struct ContentView: View {
         vm.isAnyFullscreen
             && devFullscreenMode == .dim
             && !isHovering
-            && !devActivity.items.contains { $0.status == .wait }
+            && !(devLiveActivityStyle == .face ? faceObserver.hasUrgentSignal() : devActivity.items.contains { $0.status == .wait })
+    }
+
+    private var shouldShowCompanionFaceInStack: Bool {
+        guard devLiveActivityStyle == .face,
+              shouldShowDevMascotsInFullscreen,
+              !vm.hideOnClosed
+        else { return false }
+        if !devActivity.items.isEmpty || faceObserver.hasUrgentSignal() {
+            return true
+        }
+        if Defaults[.devMascotMusic] && musicManager.isPlaying {
+            return true
+        }
+        return faceShowWhenIdle || showNotHumanFace
     }
 
     /// Closed-notch activities, newest first. A notification sits in front of
@@ -153,7 +173,7 @@ struct ContentView: View {
             }
         }
 
-        if !devActivity.items.isEmpty && shouldShowDevMascotsInFullscreen {
+        if shouldShowCompanionFaceInStack || (devLiveActivityStyle == .mascots && !devActivity.items.isEmpty && shouldShowDevMascotsInFullscreen) {
             items.append(.dev)
         }
 
@@ -354,11 +374,20 @@ struct ContentView: View {
                     }
                     .contentShape(Rectangle())
                     .onHover { hovering in
+                        if hovering { faceObserver.noteActivity() }
                         handleHover(hovering)
                     }
                     .onTapGesture {
                         if vm.notchState == .closed && !shouldDisplayNowPlayingFallbackNotice {
+                            if isShowingDroppedChinFace {
+                                faceObserver.triggerReaction(.poke)
+                            }
                             doOpen()
+                        }
+                    }
+                    .onChange(of: vm.notchState) { _, newState in
+                        if newState == .closed {
+                            faceObserver.noteActivity()
                         }
                     }
                     .conditionalModifier(Defaults[.enableGestures] && !shouldDisplayNowPlayingFallbackNotice) { view in

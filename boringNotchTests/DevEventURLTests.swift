@@ -157,4 +157,130 @@ final class DevEventURLTests: XCTestCase {
         XCTAssertEqual(engine.pose.mouth, target.mouth, accuracy: 0.01)
         XCTAssertTrue(engine.isSettled(for: .working))
     }
+
+    func testMacFaceInputsResolvesCrossModulePriorityOrder() {
+        let now = Date()
+        let run = SystemNotification(
+            id: "dev-run",
+            appName: "omp",
+            bundleID: nil,
+            title: "Build",
+            subtitle: nil,
+            body: nil,
+            receivedAt: now,
+            status: .run
+        )
+        let wait = SystemNotification(
+            id: "dev-wait",
+            appName: "omp",
+            bundleID: nil,
+            title: "Question",
+            subtitle: nil,
+            body: nil,
+            receivedAt: now,
+            status: .wait
+        )
+        let meeting = UpcomingMeetingCue(title: "Standup", minutesUntilStart: 3, joinURL: nil)
+
+        func makeInputs(
+            devItems: [SystemNotification] = [],
+            isMusicPlaying: Bool = false,
+            upcomingMeeting: UpcomingMeetingCue? = nil,
+            thermalState: SystemThermalState = .nominal,
+            isMemoryPressured: Bool = false,
+            batteryPercentage: Int? = 80,
+            isCharging: Bool = false,
+            lastActivityAt: Date = now
+        ) -> MacFaceInputs {
+            MacFaceInputs(
+                devItems: devItems,
+                celebratingUntil: [:],
+                isMusicPlaying: isMusicPlaying,
+                reactToMusic: true,
+                upcomingMeeting: upcomingMeeting,
+                reactToCalendar: true,
+                thermalState: thermalState,
+                isMemoryPressured: isMemoryPressured,
+                batteryPercentage: batteryPercentage,
+                isCharging: isCharging,
+                isPluggedIn: isCharging,
+                reactToSystem: true,
+                lastActivityAt: lastActivityAt,
+                now: now
+            )
+        }
+
+        // 1. Waiting beats meeting & thermal.
+        XCTAssertEqual(
+            makeInputs(devItems: [wait], upcomingMeeting: meeting, thermalState: .critical).resolveMood(),
+            .waiting
+        )
+        // 2. Imminent meeting beats system alerts & working.
+        XCTAssertEqual(
+            makeInputs(devItems: [run], upcomingMeeting: meeting, thermalState: .serious).resolveMood(),
+            .meeting
+        )
+        // 3. System alerts: overheated > strained > lowBattery > working.
+        XCTAssertEqual(
+            makeInputs(devItems: [run], thermalState: .serious, isMemoryPressured: true, batteryPercentage: 10).resolveMood(),
+            .overheated
+        )
+        XCTAssertEqual(
+            makeInputs(devItems: [run], isMemoryPressured: true, batteryPercentage: 10).resolveMood(),
+            .strained
+        )
+        XCTAssertEqual(
+            makeInputs(devItems: [run], batteryPercentage: 12, isCharging: false).resolveMood(),
+            .lowBattery
+        )
+        // Charging clears low-battery state -> falls through to working.
+        XCTAssertEqual(
+            makeInputs(devItems: [run], batteryPercentage: 12, isCharging: true).resolveMood(),
+            .working
+        )
+        // 4. Music listening when no agent/alert.
+        XCTAssertEqual(
+            makeInputs(isMusicPlaying: true).resolveMood(),
+            .listening
+        )
+        // 5. Idle progression -> sleepy -> sleep.
+        XCTAssertEqual(makeInputs(lastActivityAt: now.addingTimeInterval(-10)).resolveMood(), .idle)
+        XCTAssertEqual(makeInputs(lastActivityAt: now.addingTimeInterval(-90)).resolveMood(), .sleepy)
+        XCTAssertEqual(makeInputs(lastActivityAt: now.addingTimeInterval(-200)).resolveMood(), .sleep)
+    }
+
+    func testMusicVibeClassifierMapsGenresAndKeywords() {
+        XCTAssertEqual(MusicVibeClassifier.classify(genre: "Hip-Hop/Rap"), .hype)
+        XCTAssertEqual(MusicVibeClassifier.classify(genre: "Electronic"), .hype)
+        XCTAssertEqual(MusicVibeClassifier.classify(genre: "Heavy Metal"), .rock)
+        XCTAssertEqual(MusicVibeClassifier.classify(genre: "Alternative"), .rock)
+        XCTAssertEqual(MusicVibeClassifier.classify(genre: "Jazz"), .chill)
+        XCTAssertEqual(MusicVibeClassifier.classify(genre: "Classical"), .chill)
+        XCTAssertEqual(MusicVibeClassifier.classify(genre: "Pop"), .groove)
+        XCTAssertEqual(MusicVibeClassifier.classify(genre: "R&B/Soul"), .groove)
+        XCTAssertEqual(MusicVibeClassifier.classify(genre: "Singer/Songwriter"), .melancholy)
+        // Keyword heuristics work even without genre metadata.
+        XCTAssertEqual(
+            MusicVibeClassifier.classify(genre: nil, title: "Late Night Lo-Fi Study Beats", artist: "ChilledCow"),
+            .chill
+        )
+        XCTAssertEqual(
+            MusicVibeClassifier.classify(genre: nil, title: "Drift Phonk", artist: "DJ"),
+            .hype
+        )
+        XCTAssertNil(MusicVibeClassifier.classify(genre: nil, title: "Track 01", artist: "Unknown"))
+    }
+
+    func testMusicAudioMetricsExtractsBandsPunchAndInferredVibe() {
+        let bassHeavy = MusicAudioMetrics.from(bars: [0.85, 0.75, 0.45, 0.40, 0.30, 0.25], previousBass: 0.25)
+        XCTAssertEqual(bassHeavy.bass, 0.80, accuracy: 0.001)
+        XCTAssertGreaterThan(bassHeavy.bassPunch, 0.5)
+        XCTAssertEqual(bassHeavy.inferredVibe(), .hype)
+
+        let rockBright = MusicAudioMetrics.from(bars: [0.35, 0.40, 0.50, 0.50, 0.72, 0.68], previousBass: 0.35)
+        XCTAssertEqual(rockBright.inferredVibe(), .rock)
+
+        let quietChill = MusicAudioMetrics.from(bars: [0.15, 0.12, 0.18, 0.16, 0.10, 0.08], previousBass: 0.14)
+        XCTAssertEqual(quietChill.inferredVibe(), .chill)
+    }
 }
