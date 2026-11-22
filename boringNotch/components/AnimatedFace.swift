@@ -3,10 +3,11 @@
 //  zzz.notch
 //
 //  Unified procedural Mac companion face rendered in a dropped chin below the
-//  camera cutout. Reacts in real time to Dev agents, Music playback, upcoming
-//  Calendar meetings, Notifications, event-driven System health signals
-//  (thermal state, memory pressure, battery/charger), and cursor gaze — with
-//  zero background polling.
+//  camera cutout. Uses steady poses with crisp discrete saccades (zero
+//  continuous swaying/bobbing to prevent motion sickness), a live scribbling
+//  nib animation while agents work, genre-adaptive music expressions + mini
+//  mouth equalizer, upcoming calendar badges, event-driven system health alerts,
+//  and real-time interactivity (cursor gaze, app switches, clicks/typing wake).
 //
 
 import AppKit
@@ -30,8 +31,8 @@ enum AgentFaceMood: String, CaseIterable, Equatable, Sendable {
     case sleepy
     case sleep
 
-    static let sleepyAfterSeconds: TimeInterval = 60
-    static let sleepAfterSeconds: TimeInterval = 180
+    static let sleepyAfterSeconds: TimeInterval = 20
+    static let sleepAfterSeconds: TimeInterval = 45
 
     var isUrgentInFullscreen: Bool {
         switch self {
@@ -107,6 +108,7 @@ struct MusicAudioMetrics: Equatable, Sendable {
     var treble: Double = 0
     var overall: Double = 0
     var bassPunch: Double = 0
+    var bands: [Double] = [0, 0, 0, 0, 0, 0]
 
     static let silent = MusicAudioMetrics()
 
@@ -115,11 +117,13 @@ struct MusicAudioMetrics: Equatable, Sendable {
     static func from(bars: [Float], previousBass: Double) -> MusicAudioMetrics {
         guard bars.count >= 6 else {
             let avg = bars.isEmpty ? 0 : Double(bars.reduce(0, +)) / Double(bars.count)
-            return MusicAudioMetrics(bass: avg, mid: avg, treble: avg, overall: avg, bassPunch: 0)
+            let padded = (0..<6).map { idx in idx < bars.count ? Double(bars[idx]) : avg }
+            return MusicAudioMetrics(bass: avg, mid: avg, treble: avg, overall: avg, bassPunch: 0, bands: padded)
         }
-        let bass = Double(bars[0] + bars[1]) * 0.5
-        let mid = Double(bars[2] + bars[3]) * 0.5
-        let treble = Double(bars[4] + bars[5]) * 0.5
+        let dBars = bars.prefix(6).map { min(max(Double($0), 0), 1) }
+        let bass = (dBars[0] + dBars[1]) * 0.5
+        let mid = (dBars[2] + dBars[3]) * 0.5
+        let treble = (dBars[4] + dBars[5]) * 0.5
         let overall = (bass + mid + treble) / 3.0
         let punch = min(1, max(0, (bass - previousBass) * 3.8))
         return MusicAudioMetrics(
@@ -127,7 +131,8 @@ struct MusicAudioMetrics: Equatable, Sendable {
             mid: mid,
             treble: treble,
             overall: overall,
-            bassPunch: punch
+            bassPunch: punch,
+            bands: dBars
         )
     }
 
@@ -189,8 +194,6 @@ enum MusicVibeClassifier {
     }
 
     private static func matchText(_ text: String) -> MusicVibe? {
-        // Specific mood/subgenre cues first so "lo-fi hip-hop" maps to chill
-        // and "sad acoustic ballad" maps to melancholy before broader buckets.
         if chillKeywords.contains(where: { text.contains($0) }) {
             return .chill
         }
@@ -326,11 +329,18 @@ final class MacFaceObserver: ObservableObject {
     @Published private(set) var lastActivityAt = Date()
     @Published private(set) var detectedTrackGenre: String?
     @Published private(set) var musicVibeFromMetadata: MusicVibe?
+    /// Brief subtle downward glance when the user is actively typing on the Mac.
+    private(set) var lastTypingAt = Date.distantPast
+    /// Brief saccade cue when the user switches apps.
+    private(set) var lastAppSwitchAt = Date.distantPast
+    private(set) var appSwitchGlanceX: CGFloat = 0
 
     private(set) var activeReaction: AgentFaceReaction?
     private(set) var reactionAt = Date.distantPast
 
     private var thermalObserver: NSObjectProtocol?
+    private var appActivateObserver: NSObjectProtocol?
+    private var globalInputMonitor: Any?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var powerRunLoopSource: CFRunLoopSource?
     private var cancellables = Set<AnyCancellable>()
@@ -345,11 +355,18 @@ final class MacFaceObserver: ObservableObject {
         refreshBatteryState(fireChargeReaction: false)
         installSystemObservers()
         installAppObservers()
+        installUserActivityObservers()
     }
 
     deinit {
         if let thermalObserver {
             NotificationCenter.default.removeObserver(thermalObserver)
+        }
+        if let appActivateObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(appActivateObserver)
+        }
+        if let globalInputMonitor {
+            NSEvent.removeMonitor(globalInputMonitor)
         }
         memoryPressureSource?.cancel()
         if let powerRunLoopSource {
@@ -358,7 +375,10 @@ final class MacFaceObserver: ObservableObject {
     }
 
     func noteActivity() {
-        lastActivityAt = Date()
+        let now = Date()
+        if now.timeIntervalSince(lastActivityAt) > 0.35 {
+            lastActivityAt = now
+        }
     }
 
     func triggerReaction(_ reaction: AgentFaceReaction) {
@@ -372,6 +392,17 @@ final class MacFaceObserver: ObservableObject {
         let age = now.timeIntervalSince(reactionAt)
         guard age >= 0, age < activeReaction.duration else { return nil }
         return (activeReaction, age)
+    }
+
+    /// True right after user types so the face glances subtly toward the screen.
+    func isUserActivelyTyping(at now: Date) -> Bool {
+        now.timeIntervalSince(lastTypingAt) < 1.8
+    }
+
+    /// Brief directional glance when switching apps (holds steady, never oscillates).
+    func appSwitchLookX(at now: Date) -> CGFloat? {
+        guard now.timeIntervalSince(lastAppSwitchAt) < 1.4 else { return nil }
+        return appSwitchGlanceX
     }
 
     func hasUrgentSignal(now: Date = Date()) -> Bool {
@@ -389,7 +420,6 @@ final class MacFaceObserver: ObservableObject {
     }
 
     private func installSystemObservers() {
-        // 1. Thermal state notifications (zero polling).
         thermalObserver = NotificationCenter.default.addObserver(
             forName: ProcessInfo.thermalStateDidChangeNotification,
             object: nil,
@@ -405,7 +435,6 @@ final class MacFaceObserver: ObservableObject {
             }
         }
 
-        // 2. Kernel memory pressure push source (zero polling).
         let source = DispatchSource.makeMemoryPressureSource(
             eventMask: [.normal, .warning, .critical],
             queue: .main
@@ -422,7 +451,6 @@ final class MacFaceObserver: ObservableObject {
         source.resume()
         memoryPressureSource = source
 
-        // 3. IOKit power source change callback (zero polling).
         let context = Unmanaged.passUnretained(self).toOpaque()
         if let runLoopSource = IOPSNotificationCreateRunLoopSource({ ctx in
             guard let ctx else { return }
@@ -436,8 +464,44 @@ final class MacFaceObserver: ObservableObject {
         }
     }
 
+    private func installUserActivityObservers() {
+        // Wake & glance briefly when switching foreground apps (0% idle CPU).
+        appActivateObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            Task { @MainActor in
+                guard let self else { return }
+                let now = Date()
+                self.lastActivityAt = now
+                self.lastAppSwitchAt = now
+                let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                let hash = (app?.bundleIdentifier ?? "").utf8.reduce(0) { ($0 &* 31) &+ Int($1) }
+                self.appSwitchGlanceX = (hash % 2 == 0) ? 0.13 : -0.13
+            }
+        }
+
+        // Wake the face when the user clicks or types anywhere on the Mac.
+        // Never reads key characters — only records activity timestamp (throttled).
+        globalInputMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .keyDown]
+        ) { [weak self] event in
+            let isKey = event.type == .keyDown
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let now = Date()
+                if isKey {
+                    self.lastTypingAt = now
+                }
+                if now.timeIntervalSince(self.lastActivityAt) > 0.5 {
+                    self.lastActivityAt = now
+                }
+            }
+        }
+    }
+
     private func installAppObservers() {
-        // React to incoming notifications & dev failures.
         SystemNotificationManager.shared.$activeNotification
             .sink { [weak self] note in
                 guard let self, let note, note.id != self.lastNotificationID else { return }
@@ -450,7 +514,6 @@ final class MacFaceObserver: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Wake when dev sessions change.
         DevActivityStore.shared.$items
             .dropFirst()
             .sink { [weak self] _ in
@@ -458,7 +521,6 @@ final class MacFaceObserver: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Wake when music playback starts/stops & keep track genre synced.
         let music = MusicManager.shared
         music.$isPlaying
             .removeDuplicates()
@@ -503,24 +565,27 @@ final class MacFaceObserver: ObservableObject {
                 ? metrics.overall
                 : rollingEnergy * 0.94 + metrics.overall * 0.06
         } else {
-            // Gentle synthetic beat pulse when Core Audio process tap is off.
             let beatSpeed: Double = {
                 switch musicVibeFromMetadata {
                 case .hype: return 2.35
                 case .rock: return 2.5
-                case .chill: return 1.2
-                case .melancholy: return 0.95
-                case .groove, .none: return 1.9
+                case .chill: return 1.1
+                case .melancholy: return 0.9
+                case .groove, .none: return 1.85
                 }
             }()
-            let pulse = max(0, sin(t * 2 * .pi * beatSpeed))
-            let level = 0.25 + 0.45 * pulse
+            let bands: [Double] = (0..<6).map { i in
+                let phase = t * 2 * .pi * beatSpeed + Double(i) * 0.75
+                return 0.18 + 0.55 * max(0, sin(phase))
+            }
+            let level = bands.reduce(0, +) / 6.0
             metrics = MusicAudioMetrics(
-                bass: level,
-                mid: level * 0.85,
-                treble: level * 0.6,
+                bass: (bands[0] + bands[1]) * 0.5,
+                mid: (bands[2] + bands[3]) * 0.5,
+                treble: (bands[4] + bands[5]) * 0.5,
                 overall: level,
-                bassPunch: pulse > 0.82 ? (pulse - 0.82) * 3.5 : 0
+                bassPunch: bands[0] > 0.62 ? (bands[0] - 0.62) * 2.4 : 0,
+                bands: bands
             )
             rollingEnergy = level
         }
@@ -534,7 +599,8 @@ final class MacFaceObserver: ObservableObject {
                 mid: metrics.mid,
                 treble: metrics.treble,
                 overall: rollingEnergy > 0 ? rollingEnergy : metrics.overall,
-                bassPunch: metrics.bassPunch
+                bassPunch: metrics.bassPunch,
+                bands: metrics.bands
             )
             resolvedVibe = energySnapshot.inferredVibe()
         }
@@ -552,7 +618,6 @@ final class MacFaceObserver: ObservableObject {
             return
         }
 
-        // Immediate local heuristic pass (instant, works offline).
         let localVibe = MusicVibeClassifier.classify(
             genre: nil,
             title: cleanTitle,
@@ -577,7 +642,6 @@ final class MacFaceObserver: ObservableObject {
 
         guard Defaults[.devMascotMusic] else { return }
         genreLookupTask = Task { [weak self] in
-            // Short debounce so fast track skipping doesn't fire unnecessary lookups.
             try? await Task.sleep(for: .milliseconds(450))
             guard !Task.isCancelled else { return }
             let genre = await Self.fetchITunesPrimaryGenre(title: cleanTitle, artist: cleanArtist)
@@ -641,6 +705,78 @@ final class MacFaceObserver: ObservableObject {
     }
 }
 
+// MARK: - Discrete Saccade Planner (Steady Holds, Zero Motion Sickness)
+
+enum FaceSaccade {
+    /// Deterministic hash in 0..<1 for natural non-metronomic eye holds & blinks.
+    static func hash01(_ n: Int) -> Double {
+        var x = UInt64(bitPattern: Int64(n)) &* 0x9E37_79B9_7F4A_7C15
+        x ^= x >> 29
+        x &*= 0xBF58_476D_1CE4_E5B9
+        x ^= x >> 32
+        return Double(x % 10_000) / 10_000.0
+    }
+
+    /// Returns a **constant** look offset that holds completely still for 2.8–4.5s,
+    /// then snaps cleanly to a new target via the spring engine (no sine wobble!).
+    static func discreteLook(at t: TimeInterval, mood: AgentFaceMood) -> CGPoint {
+        switch mood {
+        case .sleep, .sleepy, .lowBattery, .overheated, .strained:
+            return .zero
+        case .working:
+            // Eyes stay steady, gently glancing down toward the scribbling nib.
+            return CGPoint(x: 0, y: 0.04)
+        case .waiting:
+            // Mostly steady straight ahead, occasional small attentive shift.
+            let slot = Int(floor(t / 3.2))
+            let r = hash01(slot &+ 91)
+            if r < 0.72 { return .zero }
+            return CGPoint(x: r < 0.86 ? -0.07 : 0.07, y: 0)
+        case .meeting:
+            let slot = Int(floor(t / 3.0))
+            let r = hash01(slot &+ 137)
+            return CGPoint(x: r < 0.5 ? 0 : (r < 0.75 ? -0.09 : 0.09), y: -0.02)
+        case .done:
+            return .zero
+        case .listening:
+            // Hold steady for ~3.5s per phrase, occasionally glance left/right.
+            let slot = Int(floor(t / 3.6))
+            let r = hash01(slot &+ 211)
+            if r < 0.55 { return .zero }
+            if r < 0.78 { return CGPoint(x: 0.13, y: -0.02) }
+            return CGPoint(x: -0.13, y: -0.02)
+        case .idle:
+            // Classic video behavior: hold center, occasionally snap left/right & hold still.
+            let slot = Int(floor(t / 3.8))
+            let r = hash01(slot &+ 43)
+            if r < 0.52 { return .zero }
+            if r < 0.74 { return CGPoint(x: 0.16, y: 0.01) }
+            if r < 0.94 { return CGPoint(x: -0.16, y: 0.01) }
+            return CGPoint(x: 0, y: 0.07)
+        }
+    }
+
+    /// Natural randomized single or occasional double blink inside each ~3.8s slot.
+    static func isBlinking(at t: TimeInterval, mood: AgentFaceMood) -> Bool {
+        guard mood != .sleep && mood != .sleepy else { return false }
+        let slotLength = mood == .listening ? 4.2 : 3.8
+        let slot = Int(floor(t / slotLength))
+        let local = t - Double(slot) * slotLength
+        let blinkAt = 0.6 + hash01(slot &+ 17) * (slotLength - 1.2)
+        if local >= blinkAt && local <= blinkAt + 0.11 {
+            return true
+        }
+        // ~20% chance of a quick expressive double-blink.
+        if hash01(slot &+ 59) < 0.20 {
+            let secondAt = blinkAt + 0.22
+            if local >= secondAt && local <= secondAt + 0.10 {
+                return true
+            }
+        }
+        return false
+    }
+}
+
 // MARK: - Procedural Pose & Spring Physics
 
 /// Every pose is a small vector of normalized numbers; the canvas only draws these.
@@ -649,49 +785,64 @@ struct AgentFacePose: Equatable, Sendable {
     var eyeH: CGFloat
     var lookX: CGFloat
     var lookY: CGFloat
-    /// 0 hidden … 1 full wavy working mouth.
-    var mouth: CGFloat
+    /// 0 upright … +1 inward fierce/focused tilt (\ /), -1 soft outer droop (/ \).
+    var tilt: CGFloat
+    /// 0 hidden … 1 active scribble/working mode.
+    var scribble: CGFloat
     /// Color blend weights (interpolated smoothly by the spring).
     var red: Double
     var green: Double
     var blue: Double
-    /// 0 normal … 1 celebratory smile arc.
+    /// 0 normal … 1 happy smile arc.
     var smile: Double
 
-    static func target(_ mood: AgentFaceMood) -> AgentFacePose {
+    static func target(_ mood: AgentFaceMood, musicVibe: MusicVibe = .groove) -> AgentFacePose {
         switch mood {
         case .idle:
-            AgentFacePose(eyeW: 0.30, eyeH: 0.70, lookX: 0, lookY: 0, mouth: 0, red: 0.80, green: 0.78, blue: 0.98, smile: 0)
+            // Chunky expressive tall pills matching the reference video (00:00–00:04).
+            AgentFacePose(eyeW: 0.34, eyeH: 0.74, lookX: 0, lookY: 0, tilt: 0, scribble: 0, red: 0.88, green: 0.88, blue: 0.98, smile: 0)
         case .working:
-            AgentFacePose(eyeW: 0.30, eyeH: 0.62, lookX: -0.12, lookY: -0.04, mouth: 1, red: 0.80, green: 0.78, blue: 0.98, smile: 0)
+            // Focused inward-angled eyes + scribbling nib below (video 00:05–00:16).
+            AgentFacePose(eyeW: 0.34, eyeH: 0.66, lookX: 0, lookY: -0.06, tilt: 0.85, scribble: 1, red: 0.88, green: 0.88, blue: 0.98, smile: 0)
         case .waiting:
-            AgentFacePose(eyeW: 0.34, eyeH: 0.85, lookX: 0, lookY: -0.10, mouth: 0, red: 1.00, green: 0.86, blue: 0.18, smile: 0)
+            AgentFacePose(eyeW: 0.36, eyeH: 0.86, lookX: 0, lookY: -0.06, tilt: 0, scribble: 0, red: 1.00, green: 0.86, blue: 0.22, smile: 0)
         case .done:
-            AgentFacePose(eyeW: 0.34, eyeH: 0.56, lookX: 0, lookY: -0.04, mouth: 0, red: 0.45, green: 0.94, blue: 0.65, smile: 1)
+            AgentFacePose(eyeW: 0.36, eyeH: 0.56, lookX: 0, lookY: -0.03, tilt: 0, scribble: 0, red: 0.45, green: 0.95, blue: 0.66, smile: 1)
         case .listening:
-            AgentFacePose(eyeW: 0.32, eyeH: 0.54, lookX: 0, lookY: -0.02, mouth: 0, red: 0.78, green: 0.82, blue: 1.00, smile: 0.65)
+            switch musicVibe {
+            case .chill:
+                AgentFacePose(eyeW: 0.40, eyeH: 0.36, lookX: 0, lookY: 0.03, tilt: 0, scribble: 0, red: 0.86, green: 0.84, blue: 0.98, smile: 0.60)
+            case .groove:
+                AgentFacePose(eyeW: 0.35, eyeH: 0.64, lookX: 0, lookY: -0.02, tilt: 0, scribble: 0, red: 0.82, green: 0.88, blue: 1.00, smile: 0.90)
+            case .hype:
+                AgentFacePose(eyeW: 0.35, eyeH: 0.72, lookX: 0, lookY: -0.06, tilt: 0.25, scribble: 0, red: 0.96, green: 0.62, blue: 0.96, smile: 0)
+            case .rock:
+                AgentFacePose(eyeW: 0.36, eyeH: 0.66, lookX: 0, lookY: -0.05, tilt: 1.0, scribble: 0, red: 1.00, green: 0.48, blue: 0.44, smile: 0)
+            case .melancholy:
+                AgentFacePose(eyeW: 0.34, eyeH: 0.60, lookX: 0, lookY: 0.04, tilt: -0.85, scribble: 0, red: 0.62, green: 0.76, blue: 0.98, smile: 0)
+            }
         case .meeting:
-            AgentFacePose(eyeW: 0.33, eyeH: 0.78, lookX: 0, lookY: -0.08, mouth: 0, red: 0.42, green: 0.88, blue: 1.00, smile: 0)
+            AgentFacePose(eyeW: 0.35, eyeH: 0.78, lookX: 0, lookY: -0.06, tilt: 0, scribble: 0, red: 0.44, green: 0.90, blue: 1.00, smile: 0)
         case .overheated:
-            AgentFacePose(eyeW: 0.36, eyeH: 0.44, lookX: 0, lookY: 0.04, mouth: 0.45, red: 1.00, green: 0.52, blue: 0.28, smile: 0)
+            AgentFacePose(eyeW: 0.38, eyeH: 0.44, lookX: 0, lookY: 0.04, tilt: -0.55, scribble: 0, red: 1.00, green: 0.54, blue: 0.28, smile: 0)
         case .strained:
-            AgentFacePose(eyeW: 0.38, eyeH: 0.30, lookX: 0, lookY: 0.02, mouth: 0.65, red: 1.00, green: 0.76, blue: 0.30, smile: 0)
+            AgentFacePose(eyeW: 0.42, eyeH: 0.26, lookX: 0, lookY: 0.02, tilt: 0.55, scribble: 0, red: 1.00, green: 0.78, blue: 0.30, smile: 0)
         case .lowBattery:
-            AgentFacePose(eyeW: 0.40, eyeH: 0.22, lookX: 0, lookY: 0.10, mouth: 0, red: 0.96, green: 0.42, blue: 0.42, smile: 0)
+            AgentFacePose(eyeW: 0.42, eyeH: 0.22, lookX: 0, lookY: 0.08, tilt: -0.45, scribble: 0, red: 0.96, green: 0.42, blue: 0.42, smile: 0)
         case .sleepy:
-            AgentFacePose(eyeW: 0.42, eyeH: 0.16, lookX: 0, lookY: 0.10, mouth: 0, red: 0.76, green: 0.74, blue: 0.94, smile: 0)
+            // Chunky crisp horizontal bars straight from video 00:18!
+            AgentFacePose(eyeW: 0.46, eyeH: 0.18, lookX: 0, lookY: 0.05, tilt: 0, scribble: 0, red: 0.84, green: 0.84, blue: 0.96, smile: 0)
         case .sleep:
-            AgentFacePose(eyeW: 0.42, eyeH: 0.05, lookX: 0, lookY: 0.14, mouth: 0, red: 0.70, green: 0.68, blue: 0.88, smile: 0)
+            AgentFacePose(eyeW: 0.44, eyeH: 0.06, lookX: 0, lookY: 0.10, tilt: 0, scribble: 0, red: 0.74, green: 0.74, blue: 0.90, smile: 0)
         }
     }
 }
 
-/// Critically damped spring following the target pose each frame.
-/// Kept non-`@Published` so stepping inside `TimelineView` never triggers extra
-/// SwiftUI body invalidations.
+/// Critically damped spring following the target pose & discrete saccade target.
+/// No overshoot wobble, no continuous oscillation.
 final class AgentFaceEngine: ObservableObject {
     private(set) var pose: AgentFacePose
-    private var velocity = [CGFloat](repeating: 0, count: 9)
+    private var velocity = [CGFloat](repeating: 0, count: 10)
     private var lastTimestamp: TimeInterval?
 
     init(initialMood: AgentFaceMood = .idle) {
@@ -701,6 +852,8 @@ final class AgentFaceEngine: ObservableObject {
     func step(
         to mood: AgentFaceMood,
         at timestamp: TimeInterval,
+        musicVibe: MusicVibe = .groove,
+        lookOverride: CGPoint = .zero,
         tintOverride: (r: Double, g: Double, b: Double)? = nil
     ) -> AgentFacePose {
         let dt: CGFloat
@@ -711,24 +864,27 @@ final class AgentFaceEngine: ObservableObject {
         }
         lastTimestamp = timestamp
 
-        var target = AgentFacePose.target(mood)
+        var target = AgentFacePose.target(mood, musicVibe: musicVibe)
+        target.lookX += lookOverride.x
+        target.lookY += lookOverride.y
         if let tint = tintOverride {
-            target.red = target.red * 0.55 + tint.r * 0.45
-            target.green = target.green * 0.55 + tint.g * 0.45
-            target.blue = target.blue * 0.55 + tint.b * 0.45
+            target.red = target.red * 0.6 + tint.r * 0.4
+            target.green = target.green * 0.6 + tint.g * 0.4
+            target.blue = target.blue * 0.6 + tint.b * 0.4
         }
 
         var cur: [CGFloat] = [
-            pose.eyeW, pose.eyeH, pose.lookX, pose.lookY, pose.mouth,
-            CGFloat(pose.red), CGFloat(pose.green), CGFloat(pose.blue), CGFloat(pose.smile)
+            pose.eyeW, pose.eyeH, pose.lookX, pose.lookY, pose.tilt,
+            pose.scribble, CGFloat(pose.red), CGFloat(pose.green), CGFloat(pose.blue), CGFloat(pose.smile)
         ]
         let tgt: [CGFloat] = [
-            target.eyeW, target.eyeH, target.lookX, target.lookY, target.mouth,
-            CGFloat(target.red), CGFloat(target.green), CGFloat(target.blue), CGFloat(target.smile)
+            target.eyeW, target.eyeH, target.lookX, target.lookY, target.tilt,
+            target.scribble, CGFloat(target.red), CGFloat(target.green), CGFloat(target.blue), CGFloat(target.smile)
         ]
 
-        let stiffness: CGFloat = 170
-        let damping: CGFloat = 18
+        // Critically damped (c ≈ 2 * sqrt(k)): crisp snappy saccades with zero bounce wobble.
+        let stiffness: CGFloat = 180
+        let damping: CGFloat = 26
         for i in cur.indices {
             velocity[i] += (stiffness * (tgt[i] - cur[i]) - damping * velocity[i]) * dt
             cur[i] += velocity[i] * dt
@@ -739,23 +895,23 @@ final class AgentFaceEngine: ObservableObject {
             eyeH: max(0.02, cur[1]),
             lookX: cur[2],
             lookY: cur[3],
-            mouth: min(max(cur[4], 0), 1),
-            red: Double(min(max(cur[5], 0), 1)),
-            green: Double(min(max(cur[6], 0), 1)),
-            blue: Double(min(max(cur[7], 0), 1)),
-            smile: Double(min(max(cur[8], 0), 1))
+            tilt: min(max(cur[4], -1), 1),
+            scribble: min(max(cur[5], 0), 1),
+            red: Double(min(max(cur[6], 0), 1)),
+            green: Double(min(max(cur[7], 0), 1)),
+            blue: Double(min(max(cur[8], 0), 1)),
+            smile: Double(min(max(cur[9], 0), 1))
         )
         return pose
     }
 
-    func isSettled(for mood: AgentFaceMood) -> Bool {
-        let target = AgentFacePose.target(mood)
+    func isSettled(for mood: AgentFaceMood, musicVibe: MusicVibe = .groove) -> Bool {
+        let target = AgentFacePose.target(mood, musicVibe: musicVibe)
         let diffs: [CGFloat] = [
             abs(pose.eyeW - target.eyeW),
             abs(pose.eyeH - target.eyeH),
-            abs(pose.lookX - target.lookX),
-            abs(pose.lookY - target.lookY),
-            abs(pose.mouth - target.mouth),
+            abs(pose.tilt - target.tilt),
+            abs(pose.scribble - target.scribble),
             abs(CGFloat(pose.red - target.red)),
             abs(CGFloat(pose.green - target.green)),
             abs(CGFloat(pose.blue - target.blue)),
@@ -763,20 +919,19 @@ final class AgentFaceEngine: ObservableObject {
         ]
         let maxDiff = diffs.max() ?? 0
         let maxVel = velocity.map(abs).max() ?? 0
-        return maxDiff < 0.006 && maxVel < 0.012
+        return maxDiff < 0.008 && maxVel < 0.015
     }
 }
 
-// MARK: - Cursor Gaze & Poke Tracking
+// MARK: - Cursor Gaze Tracking
 
 final class FaceTrackingNSView: NSView {
     var onGazeChanged: ((CGPoint?) -> Void)?
-    var onPoke: (() -> Void)?
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
-        let expanded = bounds.insetBy(dx: -80, dy: -32)
+        let expanded = bounds.insetBy(dx: -110, dy: -48)
         addTrackingArea(
             NSTrackingArea(
                 rect: expanded,
@@ -789,9 +944,8 @@ final class FaceTrackingNSView: NSView {
     override func mouseMoved(with event: NSEvent) {
         let loc = convert(event.locationInWindow, from: nil)
         guard bounds.width > 0, bounds.height > 0 else { return }
-        let nx = max(-1, min(1, ((loc.x / bounds.width) - 0.5) * 1.4))
-        // NSView Y grows upward; SwiftUI Canvas Y grows downward.
-        let ny = max(-1, min(1, (0.5 - (loc.y / bounds.height)) * 1.4))
+        let nx = max(-1, min(1, ((loc.x / bounds.width) - 0.5) * 1.25))
+        let ny = max(-1, min(1, (0.5 - (loc.y / bounds.height)) * 1.1))
         onGazeChanged?(CGPoint(x: nx, y: ny))
     }
 
@@ -800,7 +954,6 @@ final class FaceTrackingNSView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // Stay transparent to clicks so ContentView tap/drag/hover work normally.
         nil
     }
 }
@@ -833,6 +986,8 @@ struct AgentFaceFrameContext {
     var musicMetrics: MusicAudioMetrics = .silent
     var musicTint: (r: Double, g: Double, b: Double)? = nil
     var gaze: CGPoint? = nil
+    var isUserTyping: Bool = false
+    var appSwitchLookX: CGFloat? = nil
     var devActivity: String? = nil
 }
 
@@ -849,16 +1004,16 @@ struct AgentFaceCanvas: View {
     }
 
     private func frameInterval(for ctx: AgentFaceFrameContext) -> Double {
-        if ctx.reaction != nil || ctx.gaze != nil || !engine.isSettled(for: ctx.mood) {
+        if ctx.reaction != nil || ctx.gaze != nil || !engine.isSettled(for: ctx.mood, musicVibe: ctx.musicVibe) {
             return 1.0 / 30.0
         }
         switch ctx.mood {
-        case .working, .waiting, .done, .listening, .meeting, .overheated, .strained:
+        case .working, .listening, .overheated:
             return 1.0 / 30.0
-        case .idle, .sleepy, .lowBattery:
+        case .waiting, .done, .meeting, .strained, .idle, .sleepy, .lowBattery:
             return 1.0 / 20.0
         case .sleep:
-            return 1.0 / 6.0
+            return 1.0 / 8.0
         }
     }
 
@@ -868,9 +1023,32 @@ struct AgentFaceCanvas: View {
             let now = timeline.date
             let t = now.timeIntervalSinceReferenceDate
             let frame = contextProvider(now)
+            let reaction = frame.reaction?.reaction
+
+            // Compute a STEADY discrete look target (cursor > skip > app switch > typing > saccade).
+            // All transitions go through the critically damped spring — zero sine-wave wobbling!
+            let targetLook: CGPoint = {
+                if let gaze = frame.gaze {
+                    return CGPoint(x: gaze.x * 0.17, y: gaze.y * 0.08)
+                }
+                if reaction == .trackSkip {
+                    return CGPoint(x: 0.18, y: 0)
+                }
+                if let switchX = frame.appSwitchLookX, frame.mood == .idle {
+                    return CGPoint(x: switchX, y: 0)
+                }
+                if frame.isUserTyping && (frame.mood == .idle || frame.mood == .sleepy) {
+                    // Gently look down toward what the user is typing (just like video 00:00–00:04!).
+                    return CGPoint(x: 0.04, y: 0.06)
+                }
+                return FaceSaccade.discreteLook(at: t, mood: frame.mood)
+            }()
+
             let p = engine.step(
                 to: frame.mood,
                 at: t,
+                musicVibe: frame.musicVibe,
+                lookOverride: targetLook,
                 tintOverride: frame.mood == .listening ? listeningTint(for: frame) : nil
             )
 
@@ -878,14 +1056,11 @@ struct AgentFaceCanvas: View {
                 let s = min(size.width, size.height)
                 guard s > 0 else { return }
 
-                let reaction = frame.reaction?.reaction
-                let reactionAge = frame.reaction?.age ?? 0
                 let reactionPulse = frame.reaction.map { max(0, 1 - ($0.age / $0.reaction.duration)) } ?? 0
                 let isPureMusic = frame.mood == .listening && reaction == nil
                 let vibe = frame.musicVibe
                 let audio = frame.musicMetrics
 
-                // Resolve effective color (reactions temporarily override tint).
                 var r = p.red, g = p.green, b = p.blue
                 if reaction == .failed {
                     r = 1.0; g = 0.42; b = 0.42
@@ -894,108 +1069,30 @@ struct AgentFaceCanvas: View {
                 }
                 let color = Color(red: r, green: g, blue: b)
 
-                // Micro-motion: blink, glance, genre-adaptive music rhythm, sleep breath, cursor gaze.
-                let blinkCycle: Double = (isPureMusic && vibe == .chill) ? 4.4 : 3.3
-                let blinking = frame.mood != .sleep
-                    && frame.mood != .sleepy
-                    && reaction != .failed
+                let blinking = reaction != .failed
                     && reaction != .poke
-                    && t.truncatingRemainder(dividingBy: blinkCycle) < 0.13
+                    && FaceSaccade.isBlinking(at: t, mood: frame.mood)
 
-                let glance: CGFloat = {
-                    if let gaze = frame.gaze {
-                        return gaze.x * 0.14
-                    }
-                    if reaction == .trackSkip {
-                        return CGFloat(sin(min(reactionAge * 5, .pi)) * 0.18)
-                    }
-                    switch frame.mood {
-                    case .working:
-                        let speed = frame.devActivity == "search" ? 2.6 : 1.7
-                        let amp = frame.devActivity == "search" ? 0.14 : 0.10
-                        return CGFloat(sin(t * speed) * amp)
-                    case .listening:
-                        switch vibe {
-                        case .chill:
-                            return CGFloat(sin(t * 1.05) * 0.055)
-                        case .melancholy:
-                            return CGFloat(sin(t * 0.8) * 0.03)
-                        case .groove:
-                            return CGFloat(sin(t * 2.2) * 0.075)
-                        case .hype:
-                            return CGFloat(sin(t * 3.1) * (0.05 + audio.bass * 0.05))
-                        case .rock:
-                            return CGFloat(sin(t * 3.8) * 0.04)
-                        }
-                    case .meeting:
-                        return CGFloat(sin(t * 2.0) * 0.05)
-                    case .sleep:
-                        return 0
-                    default:
-                        return CGFloat(sin(t * 0.6) * 0.02)
-                    }
-                }()
+                // Eyes stay completely grounded at spring-smoothed (cx, cy) — ZERO bobbing!
+                let cx = size.width / 2 + p.lookX * s
+                let cy = size.height * 0.42 + p.lookY * s
+                let gap = s * (frame.mood == .strained ? 0.38 : 0.42)
+                let strokeW = max(1.7, s * 0.032)
 
-                let gazeY: CGFloat = frame.gaze.map { $0.y * 0.08 } ?? 0
-                let musicBobY: CGFloat = {
-                    guard frame.musicListening else { return 0 }
-                    let scale: Double = frame.mood == .listening ? 1.0 : 0.45
-                    switch vibe {
-                    case .chill:
-                        return CGFloat(sin(t * 1.4) * 0.025 * scale)
-                    case .melancholy:
-                        return CGFloat((0.03 + sin(t * 0.9) * 0.015) * scale)
-                    case .groove:
-                        return CGFloat(-(audio.overall * 0.065 + audio.bassPunch * 0.05) * scale)
-                    case .hype:
-                        return CGFloat(-(audio.bass * 0.075 + audio.bassPunch * 0.095) * scale)
-                    case .rock:
-                        // Strong downward headbang accent on kick/treble hits.
-                        let bang = (audio.bassPunch * 0.12) + (audio.treble * 0.05)
-                        return CGFloat((bang - audio.overall * 0.04) * scale)
-                    }
-                }()
-                let reactionBobY: CGFloat = (reaction == .poke || reaction == .charged || reaction == .trackChange)
-                    ? CGFloat(-abs(sin(reactionAge * 8)) * 0.07 * reactionPulse)
-                    : 0
-                let breathY: CGFloat = frame.mood == .sleep
-                    ? CGFloat(sin(t * 1.1) * 0.018)
-                    : 0
+                // Draw Eyes with subtle 3D perspective when looking sideways (video 00:00–00:02!)
+                let turnRatio = min(max(p.lookX / 0.18, -1), 1)
 
-                let cx = size.width / 2 + (p.lookX + glance) * s
-                let cy = size.height * 0.42 + (p.lookY + gazeY + musicBobY + reactionBobY + breathY) * s
-                let gap = s * (frame.mood == .strained ? 0.34 : 0.38)
-                let strokeW = max(1.6, s * 0.032)
-
-                // Draw Eyes
                 for (index, side) in [-1.0, 1.0].enumerated() {
                     let ex = cx + CGFloat(side) * gap / 2
-                    var baseW = p.eyeW * s * 0.62
-                    var baseH = p.eyeH * s * 0.62 * (blinking ? 0.12 : 1)
+                    // Far eye narrows subtly when turning sideways for natural 3D depth.
+                    let perspectiveW: CGFloat = 1.0 - max(0, CGFloat(side) * turnRatio) * 0.14
+                    let perspectiveH: CGFloat = 1.0 - max(0, CGFloat(side) * turnRatio) * 0.06
 
-                    // Genre-adaptive eye squash/stretch & lid proportions while listening.
-                    if isPureMusic && !blinking {
-                        switch vibe {
-                        case .chill:
-                            baseH *= 0.62
-                            baseW *= 1.08
-                        case .melancholy:
-                            baseH *= 0.88
-                        case .groove:
-                            baseH *= CGFloat(1.0 + audio.bassPunch * 0.14)
-                        case .hype:
-                            // Snappy squash-and-stretch on bass kicks.
-                            baseW *= CGFloat(1.0 + audio.bassPunch * 0.22)
-                            baseH *= CGFloat(1.05 + audio.bass * 0.22 - audio.bassPunch * 0.10)
-                        case .rock:
-                            baseH *= CGFloat(0.92 + audio.bassPunch * 0.18)
-                            baseW *= 1.06
-                        }
-                    }
+                    let baseW = p.eyeW * s * 0.62 * perspectiveW
+                    var baseH = p.eyeH * s * 0.62 * perspectiveH * (blinking ? 0.10 : 1)
 
-                    // Curious notification glance: asymmetric eyebrow/eye height (o O).
                     if reaction == .curious {
-                        baseH *= (index == 0 ? 0.78 : 1.18)
+                        baseH *= (index == 0 ? 0.72 : 1.18)
                     } else if reaction == .charged {
                         baseH *= 1.12
                     }
@@ -1003,8 +1100,8 @@ struct AgentFaceCanvas: View {
                     if reaction == .failed {
                         // Expressive > < eyes for failed runs.
                         var chevron = Path()
-                        let hw = baseW * 0.55
-                        let hh = max(4, s * 0.12)
+                        let hw = baseW * 0.52
+                        let hh = max(4.5, s * 0.12)
                         if index == 0 {
                             chevron.move(to: CGPoint(x: ex - hw, y: cy - hh))
                             chevron.addLine(to: CGPoint(x: ex + hw, y: cy))
@@ -1019,146 +1116,149 @@ struct AgentFaceCanvas: View {
                             with: .color(color),
                             style: StrokeStyle(lineWidth: strokeW, lineCap: .round, lineJoin: .round)
                         )
-                    } else if reaction == .poke {
-                        // Happy ^ ^ curved eyes when poked.
+                    } else if reaction == .poke || (frame.mood == .done && reaction == nil) {
+                        // Happy ^ ^ curved eyes when poked or agent finishes (`ok`).
                         var arc = Path()
-                        let hw = baseW * 0.65
-                        arc.move(to: CGPoint(x: ex - hw, y: cy + s * 0.04))
+                        let hw = baseW * 0.62
+                        arc.move(to: CGPoint(x: ex - hw, y: cy + s * 0.05))
                         arc.addQuadCurve(
-                            to: CGPoint(x: ex + hw, y: cy + s * 0.04),
+                            to: CGPoint(x: ex + hw, y: cy + s * 0.05),
                             control: CGPoint(x: ex, y: cy - s * 0.14)
                         )
                         ctx.stroke(
                             arc,
                             with: .color(color),
-                            style: StrokeStyle(lineWidth: strokeW, lineCap: .round)
+                            style: StrokeStyle(lineWidth: strokeW * 1.15, lineCap: .round)
                         )
                     } else {
-                        let rect = CGRect(x: ex - baseW / 2, y: cy - baseH / 2, width: baseW, height: baseH)
-                        ctx.fill(
-                            Path(roundedRect: rect, cornerRadius: min(baseW, baseH) / 2),
+                        // Draw tilted/expressive pill eye using GraphicsContext transform.
+                        // Working/Rock tilts inward (\ /), Melancholy/Overheated tilts outward (/ \).
+                        let angleDegrees = Double(p.tilt) * 14.0 * (index == 0 ? -1.0 : 1.0)
+                        var eyeCtx = ctx
+                        eyeCtx.translateBy(x: ex, y: cy)
+                        if !blinking && abs(angleDegrees) > 0.3 {
+                            eyeCtx.rotate(by: .degrees(angleDegrees))
+                        }
+                        let localRect = CGRect(x: -baseW / 2, y: -baseH / 2, width: baseW, height: baseH)
+                        eyeCtx.fill(
+                            Path(roundedRect: localRect, cornerRadius: min(baseW, baseH) / 2),
                             with: .color(color)
                         )
 
-                        // Minimalist eyelid corner masks on black background for Rock (\ /) & Melancholy (/ \).
-                        if isPureMusic && !blinking && baseH > 6 {
-                            if vibe == .rock {
-                                var lid = Path()
-                                let cutH = baseH * 0.36
-                                if index == 0 {
-                                    // Left eye: slant down toward center (\)
-                                    lid.move(to: CGPoint(x: rect.minX - 1, y: rect.minY - 1))
-                                    lid.addLine(to: CGPoint(x: rect.maxX + 1, y: rect.minY - 1))
-                                    lid.addLine(to: CGPoint(x: rect.maxX + 1, y: rect.minY + cutH))
-                                    lid.closeSubpath()
-                                } else {
-                                    // Right eye: slant down toward center (/)
-                                    lid.move(to: CGPoint(x: rect.minX - 1, y: rect.minY - 1))
-                                    lid.addLine(to: CGPoint(x: rect.maxX + 1, y: rect.minY - 1))
-                                    lid.addLine(to: CGPoint(x: rect.minX - 1, y: rect.minY + cutH))
-                                    lid.closeSubpath()
-                                }
-                                ctx.fill(lid, with: .color(.black))
-                            } else if vibe == .melancholy {
-                                var lid = Path()
-                                let cutH = baseH * 0.32
-                                if index == 0 {
-                                    // Left eye: outer top edge softens downward (/)
-                                    lid.move(to: CGPoint(x: rect.minX - 1, y: rect.minY - 1))
-                                    lid.addLine(to: CGPoint(x: rect.maxX + 1, y: rect.minY - 1))
-                                    lid.addLine(to: CGPoint(x: rect.minX - 1, y: rect.minY + cutH))
-                                    lid.closeSubpath()
-                                } else {
-                                    // Right eye: outer top edge softens downward (\)
-                                    lid.move(to: CGPoint(x: rect.minX - 1, y: rect.minY - 1))
-                                    lid.addLine(to: CGPoint(x: rect.maxX + 1, y: rect.minY - 1))
-                                    lid.addLine(to: CGPoint(x: rect.maxX + 1, y: rect.minY + cutH))
-                                    lid.closeSubpath()
-                                }
-                                ctx.fill(lid, with: .color(.black))
+                        // Clean slanted eyelid trim for Rock (\ /) and Melancholy (/ \).
+                        if !blinking && baseH > 8 && abs(p.tilt) > 0.45 && frame.mood != .working {
+                            var lid = Path()
+                            let cutH = baseH * 0.30 * abs(p.tilt)
+                            let inwardDown = p.tilt > 0
+                            if (index == 0 && inwardDown) || (index == 1 && !inwardDown) {
+                                lid.move(to: CGPoint(x: localRect.minX - 2, y: localRect.minY - 2))
+                                lid.addLine(to: CGPoint(x: localRect.maxX + 2, y: localRect.minY - 2))
+                                lid.addLine(to: CGPoint(x: localRect.maxX + 2, y: localRect.minY + cutH))
+                                lid.closeSubpath()
+                            } else {
+                                lid.move(to: CGPoint(x: localRect.minX - 2, y: localRect.minY - 2))
+                                lid.addLine(to: CGPoint(x: localRect.maxX + 2, y: localRect.minY - 2))
+                                lid.addLine(to: CGPoint(x: localRect.minX - 2, y: localRect.minY + cutH))
+                                lid.closeSubpath()
                             }
+                            eyeCtx.fill(lid, with: .color(.black))
                         }
                     }
                 }
 
-                // Mouth rendering: working wave, hype/rock singing wave, melancholy quiet line, or happy smile.
-                let musicWaveStrength: CGFloat = (isPureMusic && (vibe == .hype || vibe == .rock))
-                    ? CGFloat(min(1, max(0.25, audio.mid * 1.15 + audio.bassPunch * 0.45)))
-                    : 0
-                let effectiveWave = max(p.mouth, musicWaveStrength)
-
-                if effectiveWave > 0.02 && reaction != .failed {
-                    var path = Path()
-                    let mw = s * (isPureMusic && vibe == .rock ? 0.36 : 0.34)
-                    let my = cy + s * 0.32
-                    let waveSpeed: Double = {
-                        if isPureMusic && vibe == .hype { return 11.0 }
-                        if isPureMusic && vibe == .rock { return 13.0 }
-                        if frame.mood == .strained { return 10.0 }
-                        return 7.0
-                    }()
-                    let ampScale: CGFloat = isPureMusic ? (0.020 + CGFloat(audio.mid) * 0.028) : 0.025
-                    for i in 0...40 {
-                        let x = cx - mw / 2 + mw * CGFloat(i) / 40
-                        let y = my + sin(Double(i) / 40 * .pi * 4 - t * waveSpeed) * s * ampScale * effectiveWave
-                        if i == 0 {
-                            path.move(to: CGPoint(x: x, y: y))
-                        } else {
-                            path.addLine(to: CGPoint(x: x, y: y))
-                        }
-                    }
-                    ctx.stroke(
-                        path,
-                        with: .color(color.opacity(Double(effectiveWave))),
-                        style: StrokeStyle(lineWidth: max(1.5, s * 0.028), lineCap: .round, lineJoin: .round)
-                    )
-                } else if isPureMusic && vibe == .melancholy {
-                    // Subtle wistful slightly-curved mouth for ballads/melancholy tracks.
-                    let mw = s * 0.20
-                    let my = cy + s * 0.31
-                    var soft = Path()
-                    soft.move(to: CGPoint(x: cx - mw / 2, y: my))
-                    soft.addQuadCurve(
-                        to: CGPoint(x: cx + mw / 2, y: my),
-                        control: CGPoint(x: cx, y: my - s * 0.03)
-                    )
-                    ctx.stroke(
-                        soft,
-                        with: .color(color.opacity(0.65)),
-                        style: StrokeStyle(lineWidth: max(1.4, s * 0.025), lineCap: .round)
+                // 1. Working Scribbling Nib Animation (exact signature motif from video 00:05–00:16!)
+                if p.scribble > 0.05 && reaction != .failed {
+                    drawScribblingNib(
+                        in: &ctx,
+                        cx: cx,
+                        my: cy + s * 0.34,
+                        scale: s,
+                        t: t,
+                        alpha: Double(p.scribble),
+                        color: color
                     )
                 }
 
-                // Happy smile arc for done, chill/groove music, charged, or poke.
-                let musicSmile: Double = (isPureMusic && (vibe == .groove || vibe == .chill))
-                    ? (vibe == .groove ? 0.85 : 0.55)
-                    : 0
-                let smileStrength = max(
-                    frame.mood == .listening ? musicSmile : p.smile,
-                    (reaction == .poke || reaction == .charged) ? reactionPulse : 0
-                )
-                if smileStrength > 0.05 && effectiveWave < 0.25 && reaction != .failed && !(isPureMusic && vibe == .melancholy) {
-                    let mw = s * (vibe == .chill && isPureMusic ? 0.22 : 0.27)
+                // 2. Genre-Adaptive Music Mouth (steady eyes, expressive mouth!)
+                if isPureMusic {
+                    switch vibe {
+                    case .hype, .rock:
+                        // Crisp 5-bar mini equalizer mouth dancing cleanly to the live FFT bands
+                        // while the eyes remain 100% steady — expressive with zero motion sickness!
+                        drawMiniEqualizerMouth(
+                            in: &ctx,
+                            cx: cx,
+                            my: cy + s * 0.33,
+                            scale: s,
+                            bands: audio.bands,
+                            color: color
+                        )
+                    case .groove, .chill:
+                        let mw = s * (vibe == .chill ? 0.22 : 0.28)
+                        let my = cy + s * 0.29
+                        let depth = vibe == .chill ? 0.07 : 0.115
+                        var smile = Path()
+                        smile.move(to: CGPoint(x: cx - mw / 2, y: my))
+                        smile.addQuadCurve(
+                            to: CGPoint(x: cx + mw / 2, y: my),
+                            control: CGPoint(x: cx, y: my + s * CGFloat(depth))
+                        )
+                        ctx.stroke(
+                            smile,
+                            with: .color(color.opacity(vibe == .chill ? 0.65 : 0.90)),
+                            style: StrokeStyle(lineWidth: max(1.5, s * 0.028), lineCap: .round)
+                        )
+                    case .melancholy:
+                        let mw = s * 0.18
+                        let my = cy + s * 0.32
+                        var wistful = Path()
+                        wistful.move(to: CGPoint(x: cx - mw / 2, y: my))
+                        wistful.addQuadCurve(
+                            to: CGPoint(x: cx + mw / 2, y: my),
+                            control: CGPoint(x: cx, y: my - s * 0.028)
+                        )
+                        ctx.stroke(
+                            wistful,
+                            with: .color(color.opacity(0.65)),
+                            style: StrokeStyle(lineWidth: max(1.4, s * 0.025), lineCap: .round)
+                        )
+                    }
+                } else if reaction == .poke || reaction == .charged || (frame.mood == .done && reaction == nil) {
+                    let strength = frame.mood == .done ? 1.0 : reactionPulse
+                    let mw = s * 0.26
                     let my = cy + s * 0.28
-                    let depth = (vibe == .chill && isPureMusic) ? 0.075 : 0.115
                     var smile = Path()
                     smile.move(to: CGPoint(x: cx - mw / 2, y: my))
                     smile.addQuadCurve(
                         to: CGPoint(x: cx + mw / 2, y: my),
-                        control: CGPoint(x: cx, y: my + s * CGFloat(depth * smileStrength))
+                        control: CGPoint(x: cx, y: my + s * 0.11 * CGFloat(strength))
                     )
                     ctx.stroke(
                         smile,
-                        with: .color(color.opacity(smileStrength)),
+                        with: .color(color.opacity(strength)),
+                        style: StrokeStyle(lineWidth: max(1.5, s * 0.028), lineCap: .round)
+                    )
+                } else if reaction == .failed {
+                    let mw = s * 0.20
+                    let my = cy + s * 0.32
+                    var frown = Path()
+                    frown.move(to: CGPoint(x: cx - mw / 2, y: my))
+                    frown.addQuadCurve(
+                        to: CGPoint(x: cx + mw / 2, y: my),
+                        control: CGPoint(x: cx, y: my - s * 0.07)
+                    )
+                    ctx.stroke(
+                        frown,
+                        with: .color(color.opacity(0.9)),
                         style: StrokeStyle(lineWidth: max(1.5, s * 0.028), lineCap: .round)
                     )
                 }
 
-                // Overheated micro-cue: subtle animated sweat drop beside right eye.
+                // 3. Overheated micro-cue: single slow teardrop sweat bead beside right eye.
                 if frame.mood == .overheated {
-                    let phase = t.truncatingRemainder(dividingBy: 1.6) / 1.6
-                    let dropX = cx + gap / 2 + s * 0.20
-                    let dropY = cy - s * 0.16 + CGFloat(phase) * s * 0.26
+                    let phase = t.truncatingRemainder(dividingBy: 2.0) / 2.0
+                    let dropX = cx + gap / 2 + s * 0.22
+                    let dropY = cy - s * 0.14 + CGFloat(phase) * s * 0.24
                     let alpha = sin(phase * .pi)
                     let drop = CGRect(x: dropX - 2.2, y: dropY - 3.2, width: 4.4, height: 6.4)
                     ctx.fill(
@@ -1167,13 +1267,13 @@ struct AgentFaceCanvas: View {
                     )
                 }
 
-                // Sleeping micro-cue: two tiny drifting "z" specks rising gently.
+                // 4. Sleeping micro-cue: two calm drifting "z" specks (eyes stay completely still).
                 if frame.mood == .sleep {
                     for idx in 0..<2 {
-                        let phase = (t * 0.35 + Double(idx) * 0.5).truncatingRemainder(dividingBy: 1.0)
-                        let zx = cx + gap * 0.58 + CGFloat(phase) * s * 0.12
-                        let zy = cy - s * 0.10 - CGFloat(phase) * s * 0.22
-                        let alpha = sin(phase * .pi) * 0.65
+                        let phase = (t * 0.28 + Double(idx) * 0.5).truncatingRemainder(dividingBy: 1.0)
+                        let zx = cx + gap * 0.60 + CGFloat(phase) * s * 0.10
+                        let zy = cy - s * 0.10 - CGFloat(phase) * s * 0.20
+                        let alpha = sin(phase * .pi) * 0.60
                         let zSize: CGFloat = idx == 0 ? 5.5 : 4.2
                         var zPath = Path()
                         zPath.move(to: CGPoint(x: zx - zSize / 2, y: zy - zSize / 2))
@@ -1191,16 +1291,100 @@ struct AgentFaceCanvas: View {
         }
     }
 
+    /// Draws the signature writing/scribbling pen-nib leaving a crisp wavy ink trail
+    /// from left to right (matching the reference video 00:05–00:16).
+    private func drawScribblingNib(
+        in ctx: inout GraphicsContext,
+        cx: CGFloat,
+        my: CGFloat,
+        scale s: CGFloat,
+        t: TimeInterval,
+        alpha: Double,
+        color: Color
+    ) {
+        let cycle = 2.6
+        let phase = t.truncatingRemainder(dividingBy: cycle) / cycle
+        // 0.00..0.75: scribble left -> right; 0.75..1.00: hold & fade cleanly before next stroke.
+        let progress = min(1.0, phase / 0.75)
+        let fade = phase < 0.75 ? 1.0 : max(0, 1.0 - (phase - 0.75) / 0.25)
+        let strokeAlpha = alpha * fade
+
+        let lineW = s * 0.44
+        let startX = cx - lineW / 2
+        let headX = startX + lineW * CGFloat(progress)
+        let steps = max(2, Int(progress * 36))
+
+        var trail = Path()
+        for i in 0...steps {
+            let u = Double(i) / 36.0
+            let x = startX + lineW * CGFloat(u)
+            let y = my + CGFloat(sin(u * .pi * 6.0)) * s * 0.026
+            if i == 0 {
+                trail.move(to: CGPoint(x: x, y: y))
+            } else {
+                trail.addLine(to: CGPoint(x: x, y: y))
+            }
+        }
+        ctx.stroke(
+            trail,
+            with: .color(color.opacity(strokeAlpha * 0.85)),
+            style: StrokeStyle(lineWidth: max(1.4, s * 0.024), lineCap: .round, lineJoin: .round)
+        )
+
+        // Tilted glowing stylus/nib droplet at the leading tip of the stroke.
+        let headY = my + CGFloat(sin(progress * .pi * 6.0)) * s * 0.026
+        var nibCtx = ctx
+        nibCtx.translateBy(x: headX + s * 0.035, y: headY - s * 0.045)
+        nibCtx.rotate(by: .degrees(32))
+        let nibW = s * 0.075
+        let nibH = s * 0.145
+        let nibRect = CGRect(x: -nibW / 2, y: -nibH / 2, width: nibW, height: nibH)
+        nibCtx.fill(
+            Path(roundedRect: nibRect, cornerRadius: nibW / 2),
+            with: .color(color.opacity(strokeAlpha))
+        )
+    }
+
+    /// Draws a compact, grounded 5-bar equalizer mouth for Hype/Rock tracks
+    /// so music feels alive while the eyes stay steady.
+    private func drawMiniEqualizerMouth(
+        in ctx: inout GraphicsContext,
+        cx: CGFloat,
+        my: CGFloat,
+        scale s: CGFloat,
+        bands: [Double],
+        color: Color
+    ) {
+        let count = 5
+        let barW = max(2.2, s * 0.036)
+        let spacing = barW * 1.45
+        let totalW = CGFloat(count - 1) * spacing
+        let maxH = s * 0.16
+
+        for i in 0..<count {
+            let level = i < bands.count ? bands[i] : 0.2
+            // Taper outer bars slightly so it forms a pleasing smile-like silhouette.
+            let envelope = 1.0 - abs(Double(i) - 2.0) * 0.18
+            let h = max(barW, CGFloat(level * envelope) * maxH + barW)
+            let x = cx - totalW / 2 + CGFloat(i) * spacing
+            let rect = CGRect(x: x - barW / 2, y: my - h / 2, width: barW, height: h)
+            ctx.fill(
+                Path(roundedRect: rect, cornerRadius: barW / 2),
+                with: .color(color.opacity(0.92))
+            )
+        }
+    }
+
     private func listeningTint(for frame: AgentFaceFrameContext) -> (r: Double, g: Double, b: Double)? {
         if let albumTint = frame.musicTint {
             return albumTint
         }
         switch frame.musicVibe {
-        case .chill:      return (0.86, 0.82, 0.98)
-        case .groove:     return (0.78, 0.86, 1.00)
-        case .hype:       return (0.98, 0.56, 0.94)
+        case .chill:      return (0.86, 0.84, 0.98)
+        case .groove:     return (0.82, 0.88, 1.00)
+        case .hype:       return (0.96, 0.62, 0.96)
         case .rock:       return (1.00, 0.48, 0.44)
-        case .melancholy: return (0.58, 0.72, 0.98)
+        case .melancholy: return (0.62, 0.76, 0.98)
         }
     }
 }
@@ -1235,7 +1419,7 @@ struct AgentFaceDroppedChinView: View {
                     } label: {
                         HStack(spacing: 3) {
                             Circle()
-                                .fill(Color(red: 0.42, green: 0.88, blue: 1.0))
+                                .fill(Color(red: 0.44, green: 0.90, blue: 1.0))
                                 .frame(width: 4, height: 4)
                             Text(meetingBadge.badgeText)
                                 .font(.system(size: 9, weight: .semibold, design: .monospaced))
@@ -1258,7 +1442,7 @@ struct AgentFaceDroppedChinView: View {
 }
 
 /// Unified closed-notch Mac companion face reacting to Dev agents, Music,
-/// Calendar, Notifications, System health, and cursor gaze.
+/// Calendar, Notifications, System health, user activity, and cursor gaze.
 struct DevAgentFaceLiveActivity: View {
     @EnvironmentObject private var vm: BoringViewModel
     @ObservedObject private var devStore = DevActivityStore.shared
@@ -1332,6 +1516,8 @@ struct DevAgentFaceLiveActivity: View {
                     musicMetrics: musicMetrics,
                     musicTint: musicTint,
                     gaze: trackCursor ? gaze : nil,
+                    isUserTyping: observer.isUserActivelyTyping(at: date),
+                    appSwitchLookX: observer.appSwitchLookX(at: date),
                     devActivity: activeDevActivity
                 )
             }
@@ -1357,7 +1543,6 @@ struct DevAgentFaceLiveActivity: View {
     private func resolvedMusicTint(isVibing: Bool) -> (r: Double, g: Double, b: Double)? {
         guard isVibing, playerColorTinting else { return nil }
         guard let rgb = music.avgColor.usingColorSpace(.sRGB) else { return nil }
-        // Keep the tint pastel & bright so the eyes stay crisp on pure black.
         let r = max(0.55, Double(rgb.redComponent))
         let g = max(0.55, Double(rgb.greenComponent))
         let b = max(0.55, Double(rgb.blueComponent))

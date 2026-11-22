@@ -116,7 +116,7 @@ final class DevEventURLTests: XCTestCase {
             title: "Sleepy",
             subtitle: nil,
             body: nil,
-            receivedAt: now.addingTimeInterval(-90),
+            receivedAt: now.addingTimeInterval(-25),
             status: .idle
         )
         let sleepingIdle = SystemNotification(
@@ -126,7 +126,7 @@ final class DevEventURLTests: XCTestCase {
             title: "Sleep",
             subtitle: nil,
             body: nil,
-            receivedAt: now.addingTimeInterval(-240),
+            receivedAt: now.addingTimeInterval(-60),
             status: .idle
         )
 
@@ -154,7 +154,8 @@ final class DevEventURLTests: XCTestCase {
         }
         let target = AgentFacePose.target(.working)
         XCTAssertEqual(engine.pose.eyeH, target.eyeH, accuracy: 0.01)
-        XCTAssertEqual(engine.pose.mouth, target.mouth, accuracy: 0.01)
+        XCTAssertEqual(engine.pose.scribble, target.scribble, accuracy: 0.01)
+        XCTAssertEqual(engine.pose.tilt, target.tilt, accuracy: 0.01)
         XCTAssertTrue(engine.isSettled(for: .working))
     }
 
@@ -243,10 +244,10 @@ final class DevEventURLTests: XCTestCase {
             makeInputs(isMusicPlaying: true).resolveMood(),
             .listening
         )
-        // 5. Idle progression -> sleepy -> sleep.
+        // 5. Idle progression -> sleepy (20s) -> sleep (45s).
         XCTAssertEqual(makeInputs(lastActivityAt: now.addingTimeInterval(-10)).resolveMood(), .idle)
-        XCTAssertEqual(makeInputs(lastActivityAt: now.addingTimeInterval(-90)).resolveMood(), .sleepy)
-        XCTAssertEqual(makeInputs(lastActivityAt: now.addingTimeInterval(-200)).resolveMood(), .sleep)
+        XCTAssertEqual(makeInputs(lastActivityAt: now.addingTimeInterval(-25)).resolveMood(), .sleepy)
+        XCTAssertEqual(makeInputs(lastActivityAt: now.addingTimeInterval(-60)).resolveMood(), .sleep)
     }
 
     func testMusicVibeClassifierMapsGenresAndKeywords() {
