@@ -101,7 +101,7 @@ struct ContentView: View {
         if vm.notchState == .open {
             bottomCorner = openedInsets.bottom
         } else if isShowingDroppedChinFace {
-            bottomCorner = 22
+            bottomCorner = 28
         } else if let scaleFactor = cornerRadiusScaleFactor {
             bottomCorner = max(0, baseClosedBottom * scaleFactor)
         } else {
@@ -271,7 +271,8 @@ struct ContentView: View {
                 chinWidth += 2 * NotificationLiveActivity.slotSize(for: notification, notchHeight: vm.effectiveClosedNotchHeight) + 20
             case .dev:
                 if devLiveActivityStyle == .face {
-                    chinWidth += 20
+                    let showingWings = Defaults[.devMascotMusic] && musicManager.isPlaying && !faceObserver.isAudioMuted
+                    chinWidth = max(chinWidth + 20, showingWings ? 296 : 242)
                 } else {
                     chinWidth += 2 * DevActivityLiveActivity.sideWidth(count: devActivity.items.count, notchHeight: vm.effectiveClosedNotchHeight) + 4
                 }

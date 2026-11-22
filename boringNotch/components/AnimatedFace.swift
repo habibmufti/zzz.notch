@@ -472,6 +472,8 @@ final class MacFaceObserver: ObservableObject {
     private var smoothedBass: Double = 0
     private var rollingEnergy: Double = 0
 
+    var currentAudioEnvelope: AsymmetricAudioEnvelope { envelope }
+
     private init() {
         self.thermalState = SystemThermalState(ProcessInfo.processInfo.thermalState)
         refreshBatteryState(fireChargeReaction: false)
@@ -1230,13 +1232,13 @@ enum OrganicScribble {
         case returning
     }
 
-    /// 3-harmonic hand-drawn organic wave (directly adapted from Living Dynamic Notch PoC).
+    /// 3-harmonic hand-drawn organic wave (exact PoC proportions).
     static func sampleWave(u: Double, seed1: Double, seed2: Double) -> CGFloat {
         let clamped = max(0, min(1, u))
         let env = 0.42 + 0.58 * pow(sin(clamped * .pi), 0.55)
-        let w1 = sin(clamped * .pi * 6.2 * seed1) * 2.2
-        let w2 = sin(clamped * .pi * 13.4 * seed2 + 1.1) * 0.95
-        let w3 = cos(clamped * .pi * 2.9 + seed1 * 1.8) * 0.65
+        let w1 = sin(clamped * .pi * 6.2 * seed1) * 2.6
+        let w2 = sin(clamped * .pi * 13.4 * seed2 + 1.1) * 1.15
+        let w3 = cos(clamped * .pi * 2.9 + seed1 * 1.8) * 0.8
         return CGFloat((w1 + w2 + w3) * env)
     }
 }
@@ -1255,32 +1257,30 @@ enum FaceSaccade {
     /// Holds completely still for ~3.2–4.0s, then snaps cleanly to a new gaze point via spring.
     static func discreteLook(at t: TimeInterval, mood: AgentFaceMood) -> CGPoint {
         switch mood {
-        case .sleep, .sleepy, .lowBattery, .overheated, .strained, .done, .onCallCam, .onCallMic:
-            return .zero
-        case .working:
+        case .sleep, .sleepy, .lowBattery, .overheated, .strained, .done, .onCallCam, .onCallMic, .working:
             return .zero
         case .waiting:
             let slot = Int(floor(t / 3.2))
             let r = hash01(slot &+ 91)
             if r < 0.74 { return .zero }
-            return CGPoint(x: r < 0.87 ? -5.0 : 5.0, y: 0)
+            return CGPoint(x: r < 0.87 ? -6.0 : 6.0, y: 0)
         case .meeting:
             let slot = Int(floor(t / 3.0))
             let r = hash01(slot &+ 137)
-            return CGPoint(x: r < 0.55 ? 0 : (r < 0.78 ? -7.0 : 7.0), y: -1.5)
+            return CGPoint(x: r < 0.55 ? 0 : (r < 0.78 ? -8.0 : 8.0), y: -1.5)
         case .listening:
             let slot = Int(floor(t / 3.8))
             let r = hash01(slot &+ 211)
             if r < 0.58 { return .zero }
-            if r < 0.79 { return CGPoint(x: 9.0, y: -1.0) }
-            return CGPoint(x: -9.0, y: -1.0)
+            if r < 0.79 { return CGPoint(x: 11.0, y: -1.0) }
+            return CGPoint(x: -11.0, y: -1.0)
         case .idle:
             let slot = Int(floor(t / 3.8))
             let r = hash01(slot &+ 43)
             if r < 0.54 { return .zero }
-            if r < 0.76 { return CGPoint(x: 11.0, y: 0.5) }
-            if r < 0.94 { return CGPoint(x: -11.0, y: 0.5) }
-            return CGPoint(x: 0, y: 4.5)
+            if r < 0.76 { return CGPoint(x: 13.0, y: 0.5) }
+            if r < 0.94 { return CGPoint(x: -13.0, y: 0.5) }
+            return CGPoint(x: 0, y: 5.0)
         }
     }
 
@@ -1293,7 +1293,7 @@ enum FaceSaccade {
         if local >= blinkAt && local <= blinkAt + 0.105 {
             return true
         }
-        if hash01(slot &+ 59) < 0.22 {
+        if hash01(slot &+ 59) < 0.24 {
             let secondAt = blinkAt + 0.21
             if local >= secondAt && local <= secondAt + 0.095 {
                 return true
@@ -1303,7 +1303,7 @@ enum FaceSaccade {
     }
 }
 
-// MARK: - Living Avatar Physics Engine (15 Springs + 3-Phase Scribble + Particles)
+// MARK: - Living Avatar Physics Engine (1:1 PoC Springs + 3-Phase Scribble + Particles)
 
 struct SparkleParticle {
     var x: CGFloat
@@ -1325,26 +1325,26 @@ struct SleepZParticle {
     var maxLife: Double
 }
 
-/// Kept non-`@Published` so stepping inside `TimelineView` never triggers extra
-/// SwiftUI body invalidations.
+/// Exact damped harmonic spring engine tuned to the Living Dynamic Notch PoC
+/// (`stiffness: 250, damping: 19`) while keeping zero continuous sine-wave wobble.
 final class AgentFaceEngine: ObservableObject {
-    // Springs (critically damped — zero motion-sickness overshoot wobble)
-    var gazeX = FaceSpring(initial: 0, stiffness: 240, damping: 26)
-    var gazeY = FaceSpring(initial: 0, stiffness: 240, damping: 26)
-    var scaleX = FaceSpring(initial: 1, stiffness: 230, damping: 24)
-    var scaleY = FaceSpring(initial: 1, stiffness: 230, damping: 24)
-    var inwardTilt = FaceSpring(initial: 0, stiffness: 210, damping: 24)
-    var eyelidTop = FaceSpring(initial: 0, stiffness: 185, damping: 22)
-    var eyelidBottom = FaceSpring(initial: 0, stiffness: 210, damping: 22)
-    var blink = FaceSpring(initial: 0, stiffness: 460, damping: 28)
-    var mouthAmp = FaceSpring(initial: 0, stiffness: 180, damping: 20)
-    var penAlpha = FaceSpring(initial: 0, stiffness: 190, damping: 22)
-    var eyeSpacing = FaceSpring(initial: 18, stiffness: 210, damping: 22)
-    var eyeLiftY = FaceSpring(initial: 0, stiffness: 195, damping: 22)
-    var glowIntensity = FaceSpring(initial: 0, stiffness: 120, damping: 18)
-    var red = FaceSpring(initial: 0.90, stiffness: 160, damping: 22)
-    var green = FaceSpring(initial: 0.91, stiffness: 160, damping: 22)
-    var blue = FaceSpring(initial: 1.00, stiffness: 160, damping: 22)
+    var gazeX = FaceSpring(initial: 0, stiffness: 250, damping: 19)
+    var gazeY = FaceSpring(initial: 0, stiffness: 250, damping: 19)
+    var scaleX = FaceSpring(initial: 1, stiffness: 250, damping: 18)
+    var scaleY = FaceSpring(initial: 1, stiffness: 250, damping: 18)
+    var inwardTilt = FaceSpring(initial: 0, stiffness: 210, damping: 18)
+    var eyelidTop = FaceSpring(initial: 0, stiffness: 175, damping: 17)
+    var eyelidBottom = FaceSpring(initial: 0, stiffness: 210, damping: 17)
+    var blink = FaceSpring(initial: 0, stiffness: 440, damping: 24)
+    var mouthAmp = FaceSpring(initial: 0, stiffness: 180, damping: 18)
+    var penAlpha = FaceSpring(initial: 0, stiffness: 190, damping: 20)
+    var bounceY = FaceSpring(initial: 0, stiffness: 240, damping: 17)
+    var eyeSpacing = FaceSpring(initial: 22, stiffness: 210, damping: 19)
+    var eyeLiftY = FaceSpring(initial: 0, stiffness: 190, damping: 18)
+    var glowIntensity = FaceSpring(initial: 0, stiffness: 120, damping: 16)
+    var red = FaceSpring(initial: 0.90, stiffness: 160, damping: 20)
+    var green = FaceSpring(initial: 0.91, stiffness: 160, damping: 20)
+    var blue = FaceSpring(initial: 1.00, stiffness: 160, damping: 20)
 
     // 3-Phase Working Scribble state
     var scribbleProg: Double = 0
@@ -1359,6 +1359,7 @@ final class AgentFaceEngine: ObservableObject {
     var sleepZs: [SleepZParticle] = []
     private var nextSleepZAt: Double = 0.8
     private var lastSparkleNonce: Int = 0
+    private var lastReaction: AgentFaceReaction?
     private var lastTimestamp: TimeInterval?
     private var elapsed: Double = 0
     private var lastMood: AgentFaceMood = .idle
@@ -1367,8 +1368,8 @@ final class AgentFaceEngine: ObservableObject {
         self.lastMood = initialMood
         if initialMood == .working {
             penAlpha.value = 1; penAlpha.target = 1
-            eyeLiftY.value = -9; eyeLiftY.target = -9
-            eyeSpacing.value = 21; eyeSpacing.target = 21
+            eyeLiftY.value = -15; eyeLiftY.target = -15
+            eyeSpacing.value = 27; eyeSpacing.target = 27
             inwardTilt.value = 0.17; inwardTilt.target = 0.17
         }
     }
@@ -1376,7 +1377,8 @@ final class AgentFaceEngine: ObservableObject {
     func step(frame: AgentFaceFrameContext, at timestamp: TimeInterval) {
         let rawDT = lastTimestamp.map { timestamp - $0 } ?? 0
         lastTimestamp = timestamp
-        let dt = min(max(rawDT, 0), 1.0 / 30.0)
+        // Match PoC's 0.05 max dt clamp so springs never run in slow motion.
+        let dt = min(max(rawDT, 0), 0.05)
         elapsed += dt
         let cgDT = CGFloat(dt)
 
@@ -1384,27 +1386,48 @@ final class AgentFaceEngine: ObservableObject {
         let reaction = frame.reaction?.reaction
         let rAge = frame.reaction?.age ?? 0
 
-        // Reset scribble cleanly when entering `.working`.
+        // Crisp discrete one-shot impulses on state transitions (never continuous wobble!)
         if mood == .working && lastMood != .working {
             scribbleProg = 0
             scribblePhase = .writing
             scribblePhaseTime = 0
             scribbleReturnT = 0
+            bounceY.impulse(-16)
         }
         if mood == .done && lastMood != .done {
-            spawnSparkles(count: 10, color: Color(red: 0.45, green: 0.95, blue: 0.66))
+            bounceY.impulse(-38)
+            spawnSparkles(count: 12, color: Color(red: 0.65, green: 0.71, blue: 0.99))
         }
         lastMood = mood
 
-        // Spawn sparkles on external Layer 3 / Shelf events.
+        if reaction != lastReaction {
+            lastReaction = reaction
+            switch reaction {
+            case .airpods:
+                bounceY.impulse(-42)
+            case .wifiRestored:
+                bounceY.impulse(-38)
+            case .vol100:
+                scaleX.impulse(1.2)
+                scaleY.impulse(1.4)
+                bounceY.impulse(-44)
+            case .wake:
+                bounceY.impulse(26)
+            case .poke:
+                bounceY.impulse(-28)
+            default:
+                break
+            }
+        }
+
         if frame.sparkleNonce != lastSparkleNonce {
             lastSparkleNonce = frame.sparkleNonce
             let c = frame.sparkleColor
-            spawnSparkles(count: 10, color: Color(red: c.r, green: c.g, blue: c.b))
+            spawnSparkles(count: 11, color: Color(red: c.r, green: c.g, blue: c.b))
         }
 
-        // 1. 3-Phase Working Scribble Engine (writing 1.32s -> pause 0.22s -> return arc 0.28s)
-        let spanHalf: CGFloat = 29
+        // 1. 3-Phase Working Scribble Engine (exact PoC timings & span: 70pt)
+        let spanHalf: CGFloat = 35
         var penX: CGFloat = 0
         var penY: CGFloat = 0
 
@@ -1430,8 +1453,9 @@ final class AgentFaceEngine: ObservableObject {
                 if scribblePhaseTime >= pauseDur {
                     scribblePhase = .returning
                     scribblePhaseTime = 0
-                    // Crisp left carriage-return saccade impulse.
-                    gazeX.impulse(-95)
+                    // Crisp left carriage-return saccade impulse (exact PoC!)
+                    gazeX.impulse(-165)
+                    bounceY.impulse(-14)
                 }
             case .returning:
                 scribblePhaseTime += dt
@@ -1448,6 +1472,7 @@ final class AgentFaceEngine: ObservableObject {
                     let h2 = FaceSaccade.hash01(Int(elapsed * 100) &+ 71)
                     scribbleSeed1 = 0.86 + h1 * 0.34
                     scribbleSeed2 = 1.15 + h2 * 0.65
+                    bounceY.impulse(12)
                 }
             }
 
@@ -1463,15 +1488,15 @@ final class AgentFaceEngine: ObservableObject {
                 let jitter = FaceSaccade.hash01(Int(elapsed * 10) &+ 29)
                 sleepZs.append(
                     SleepZParticle(
-                        x: 20 + CGFloat(jitter) * 8,
-                        y: -6,
-                        vx: 5.5 + CGFloat(jitter) * 3.5,
-                        vy: -12.5 - CGFloat(jitter) * 4.5,
+                        x: 24 + CGFloat(jitter) * 10,
+                        y: -8,
+                        vx: 7.0 + CGFloat(jitter) * 5.0,
+                        vy: -15.0 - CGFloat(jitter) * 6.0,
                         life: 0,
                         maxLife: 1.85
                     )
                 )
-                nextSleepZAt = elapsed + 1.0
+                nextSleepZAt = elapsed + 0.95
             }
         }
         for i in stride(from: sleepZs.count - 1, through: 0, by: -1) {
@@ -1488,19 +1513,19 @@ final class AgentFaceEngine: ObservableObject {
             sparkles[i].life += dt
             sparkles[i].x += sparkles[i].vx * cgDT
             sparkles[i].y += sparkles[i].vy * cgDT
-            sparkles[i].vy += 38 * cgDT
+            sparkles[i].vy += 45 * cgDT
             if sparkles[i].life >= sparkles[i].maxLife {
                 sparkles.remove(at: i)
             }
         }
 
-        // 4. Layer 1 Base Targets (steady poses — zero continuous bounce/sway!)
+        // 4. Layer 1 Base Targets (exact PoC geometry, ZERO continuous sine wobble!)
         let grooveMult: Double = {
             if frame.isMuted { return 0 }
             if mood.isOnCall { return 0.2 }
             if mood == .sleep { return 0.1 }
             if mood == .sleepy { return 0.25 }
-            if mood == .working { return 0.35 }
+            if mood == .working { return 0.45 }
             return 1.0
         }()
 
@@ -1511,46 +1536,46 @@ final class AgentFaceEngine: ObservableObject {
         var tInward: CGFloat = 0
         var tTopLid: CGFloat = 0
         var tBotLid: CGFloat = 0
-        var tEyeSpacing: CGFloat = 18.5
+        var tBounceY: CGFloat = 0
+        var tEyeSpacing: CGFloat = 22
         var tEyeLiftY: CGFloat = 0
-        var tR: Double = 0.90, tG: Double = 0.91, tB: Double = 1.00
+        var tR: Double = 0.902, tG: Double = 0.910, tB: Double = 1.000 // #e6e8ff
 
         let isPlayingUnmuted = frame.musicListening && !frame.isMuted
         let env = frame.audioEnvelope
 
-        // Vocal-reactive humming mouth when listening to Chill/Groove/Melancholy
         let showHummingMouth = isPlayingUnmuted
             && mood == .listening
             && reaction == nil
             && (frame.musicVibe == .groove || frame.musicVibe == .chill || frame.musicVibe == .melancholy)
         mouthAmp.target = showHummingMouth
-            ? CGFloat(0.24 + env.envMid * 1.15 * grooveMult)
+            ? CGFloat(0.28 + env.envMid * 1.2 * grooveMult)
             : 0
         glowIntensity.target = isPlayingUnmuted
-            ? CGFloat(0.24 + env.envRms * 0.85 * grooveMult)
+            ? CGFloat(0.26 + env.envRms * 0.85 * grooveMult)
             : 0
 
         switch mood {
         case .working:
-            tEyeSpacing = 21.5
-            tEyeLiftY = -9.5
-            let trackX = scribblePhase == .returning ? -spanHalf * 0.42 : penX * 0.44
+            tEyeSpacing = 27
+            tEyeLiftY = -15
+            let trackX = scribblePhase == .returning ? -spanHalf * 0.45 : penX * 0.46
             tGazeX = trackX
-            tGazeY = 3.5 + (scribblePhase == .writing ? penY * 0.32 : -0.8)
+            tGazeY = 5.5 + (scribblePhase == .writing ? penY * 0.42 : -1.2)
             tInward = 0.17
             tTopLid = 0.08
-            tScaleX = 0.95
-            tScaleY = 0.94
+            tScaleX = 0.96
+            tScaleY = 0.95
 
         case .idle:
             if let gaze = frame.gaze {
-                tGazeX = gaze.x * 13.0
-                tGazeY = gaze.y * 6.5
+                tGazeX = gaze.x * 14.0
+                tGazeY = gaze.y * 7.5
             } else if let switchX = frame.appSwitchLookX {
-                tGazeX = switchX * 70
+                tGazeX = switchX * 80
             } else if frame.isUserTyping {
-                tGazeX = 3.0
-                tGazeY = 4.0
+                tGazeX = 3.5
+                tGazeY = 4.5
             } else {
                 let sac = FaceSaccade.discreteLook(at: timestamp, mood: .idle)
                 tGazeX = sac.x
@@ -1559,14 +1584,15 @@ final class AgentFaceEngine: ObservableObject {
 
         case .done:
             tScaleX = 1.06
-            tScaleY = 0.95
-            tBotLid = 0.62 // Happy ^ ^ cheek-squint arch!
-            tR = 0.45; tG = 0.95; tB = 0.66
+            tScaleY = 0.94
+            tBotLid = 0.62 // Pixar happy ^ ^ cheek-squint arch!
+            tBounceY = -2
+            tR = 0.902; tG = 0.910; tB = 1.000
 
         case .waiting:
             let sac = FaceSaccade.discreteLook(at: timestamp, mood: .waiting)
             tGazeX = sac.x
-            tGazeY = -2.0
+            tGazeY = -2.5
             tScaleX = 1.04
             tScaleY = 1.12
             tR = 1.00; tG = 0.86; tB = 0.22
@@ -1574,65 +1600,55 @@ final class AgentFaceEngine: ObservableObject {
         case .meeting:
             let sac = FaceSaccade.discreteLook(at: timestamp, mood: .meeting)
             tGazeX = sac.x
-            tGazeY = -2.5
+            tGazeY = -3.0
             tScaleX = 1.02
             tScaleY = 1.06
             tR = 0.42; tG = 0.88; tB = 1.00
 
         case .onCallCam, .onCallMic:
-            // Steady calm gaze, sleep locked out, music dampened 80%.
             tScaleX = 0.98
             tScaleY = 0.98
             tTopLid = 0.06
             tBotLid = 0.08
-            tR = 0.90; tG = 0.92; tB = 1.00
+            tR = 0.902; tG = 0.910; tB = 1.000
 
         case .listening:
             let sac = FaceSaccade.discreteLook(at: timestamp, mood: .listening)
-            tGazeX = frame.gaze.map { $0.x * 12.0 } ?? sac.x
-            tGazeY = frame.gaze.map { $0.y * 5.5 } ?? sac.y
-            tEyeLiftY = -4.0
+            tGazeX = frame.gaze.map { $0.x * 14.0 } ?? sac.x
+            tGazeY = frame.gaze.map { $0.y * 6.5 } ?? sac.y
+            tEyeLiftY = -7.0
 
             switch frame.musicVibe {
             case .chill:
-                tTopLid = min(0.42, 0.26 + CGFloat(env.envMid * 0.14))
-                tBotLid = 0.18 + CGFloat(env.envMid * 0.12)
-                tScaleX = 1.04
-                tScaleY = 0.88
-                tR = 0.86; tG = 0.84; tB = 0.98
+                tTopLid = min(0.42, 0.22 + CGFloat(env.envMid * 0.18))
+                tBotLid = 0.16 + CGFloat(env.envMid * 0.16)
+                tR = 0.902; tG = 0.910; tB = 1.000
             case .melancholy:
-                tInward = -0.14
-                tTopLid = 0.22
-                tBotLid = 0.10
-                tScaleY = 0.92
-                tR = 0.62; tG = 0.76; tB = 0.98
+                tInward = -0.13
+                tTopLid = min(0.42, 0.22 + CGFloat(env.envMid * 0.16))
+                tBotLid = 0.14 + CGFloat(env.envMid * 0.12)
+                tR = 0.78; tG = 0.84; tB = 1.00
             case .groove:
-                tBotLid = 0.28 + CGFloat(env.envMid * 0.18)
-                tTopLid = 0.04
-                tR = 0.82; tG = 0.88; tB = 1.00
+                tTopLid = CGFloat(env.envMid * 0.06)
+                tBotLid = 0.14 + CGFloat(env.envMid * 0.16)
+                tR = 0.902; tG = 0.910; tB = 1.000
             case .hype:
                 tInward = 0.08
-                tScaleX = 1.02
-                tScaleY = 1.04
-                tR = 0.96; tG = 0.62; tB = 0.96
+                tScaleX = 1.03
+                tScaleY = 1.05
+                tR = 0.94; tG = 0.82; tB = 1.00
             case .rock:
-                tInward = 0.22
+                tInward = 0.20
                 tTopLid = 0.18
                 tScaleX = 1.04
-                tR = 1.00; tG = 0.48; tB = 0.44
-            }
-
-            if let tint = frame.musicTint {
-                tR = tR * 0.55 + tint.r * 0.45
-                tG = tG * 0.55 + tint.g * 0.45
-                tB = tB * 0.55 + tint.b * 0.45
+                tR = 1.00; tG = 0.72; tB = 0.68
             }
 
         case .overheated:
             tInward = -0.12
             tTopLid = 0.26
             tScaleY = 0.84
-            tR = 1.00; tG = 0.54; tB = 0.28
+            tR = 1.00; tG = 0.56; tB = 0.30
 
         case .strained:
             tInward = 0.14
@@ -1646,25 +1662,25 @@ final class AgentFaceEngine: ObservableObject {
             tInward = -0.10
             tTopLid = 0.42
             tScaleY = 0.74
-            tR = 0.96; tG = 0.42; tB = 0.42
+            tR = 0.96; tG = 0.44; tB = 0.44
 
         case .sleepy:
-            // Clean chunky horizontal bars (never clipped by eyelids).
+            // Clean chunky horizontal bars (never erased by eyelids).
             tGazeY = 3.0
             tTopLid = 0
             tBotLid = 0
             tScaleX = 1.16
             tScaleY = 0.24
-            tR = 0.84; tG = 0.84; tB = 0.96
+            tR = 0.86; tG = 0.87; tB = 0.97
 
         case .sleep:
-            // Crisp visible `- -` sleeping bars + gentle drifting 'z' particles.
-            tGazeY = 4.0
+            // Crisp visible `- -` sleeping bars + drifting 'z' particles.
+            tGazeY = 4.5
             tTopLid = 0
             tBotLid = 0
             tScaleX = 1.18
             tScaleY = 0.14
-            tR = 0.78; tG = 0.80; tB = 0.95
+            tR = 0.72; tG = 0.75; tB = 0.89 // #b8bee4
         }
 
         // 5. Blink Target
@@ -1672,14 +1688,14 @@ final class AgentFaceEngine: ObservableObject {
         if reaction == .wake {
             // 1.2s choreographed wake-up: `- -` closed -> stretch -> double-blink greeting -> smile
             if rAge < 0.28 {
-                tScaleX = 1.18; tScaleY = 0.14; tTopLid = 0; tBotLid = 0
+                tScaleX = 1.18; tScaleY = 0.14; tTopLid = 0; tBotLid = 0; tBounceY = 3
             } else if rAge < 0.62 {
-                tScaleX = 0.92; tScaleY = 1.16; tTopLid = 0; tBotLid = 0
+                tScaleX = 0.92; tScaleY = 1.18; tTopLid = 0; tBotLid = 0; tBounceY = -5
             } else if rAge < 0.92 {
                 tBlink = ((rAge > 0.68 && rAge < 0.76) || (rAge > 0.81 && rAge < 0.89)) ? 1 : 0
-                tBotLid = 0.24
+                tBotLid = 0.22
             } else {
-                tBotLid = 0.36
+                tBotLid = 0.34
             }
         } else if reaction != .failed && reaction != .poke && mood != .sleep {
             tBlink = FaceSaccade.isBlinking(at: timestamp, mood: mood) ? 1 : 0
@@ -1688,37 +1704,34 @@ final class AgentFaceEngine: ObservableObject {
         // 6. Layer 3 One-Shot Reaction Overrides
         switch reaction {
         case .airpods:
-            tScaleX = 1.10; tScaleY = 1.10; tBotLid = 0.36; tTopLid = 0
-            tR = 0.56; tG = 0.88; tB = 1.00
+            tScaleX = 1.12; tScaleY = 1.12; tBotLid = 0.36; tTopLid = 0
         case .wifiLost:
             tScaleX = 0.94; tScaleY = 0.88; tTopLid = 0.22; tInward = -0.14
-            tR = 0.98; tG = 0.78; tB = 0.28
         case .wifiRestored:
             tScaleX = 1.08; tScaleY = 1.04; tBotLid = 0.56; tTopLid = 0
-            tR = 0.36; tG = 0.92; tB = 0.68
         case .mute:
-            tTopLid = 0.36; tBotLid = 0.14; tScaleY = 0.86
+            tTopLid = 0.34; tBotLid = 0.14; tScaleY = 0.86
         case .vol100:
-            tScaleX = 1.20; tScaleY = 1.22; tTopLid = 0; tBotLid = 0
+            tScaleX = 1.22; tScaleY = 1.24; tTopLid = 0; tBotLid = 0
         case .charged:
             tScaleX = 1.10; tScaleY = 1.12; tBotLid = 0.42; tTopLid = 0
-            tR = 0.36; tG = 0.96; tB = 0.56
+            tR = 0.40; tG = 0.96; tB = 0.62
         case .poke:
-            tScaleX = 1.08; tScaleY = 0.96; tBotLid = 0.66; tTopLid = 0
+            tScaleX = 1.08; tScaleY = 0.95; tBotLid = 0.64; tTopLid = 0
         case .trackSkip:
-            tGazeX = 14.0
+            tGazeX = 16.0
         case .trackChange:
             tScaleX = 1.06; tScaleY = 1.08; tBotLid = 0.26
         case .failed:
-            tR = 1.00; tG = 0.42; tB = 0.42
+            tR = 1.00; tG = 0.44; tB = 0.44
         case .wake, .curious, .none:
             break
         }
 
         // 7. Layer 2 Spatial Override — Drag-to-Shelf (highest gaze priority!)
         if frame.drag.active {
-            tGazeX = frame.drag.offsetX * 15.0
-            tGazeY = frame.drag.offsetY * 9.0
+            tGazeX = frame.drag.offsetX * 18.0
+            tGazeY = frame.drag.offsetY * 11.0
             let boost = 1.0 + frame.drag.proximity * 0.14
             tScaleX *= boost
             tScaleY *= boost
@@ -1736,6 +1749,7 @@ final class AgentFaceEngine: ObservableObject {
         eyelidTop.target = tTopLid
         eyelidBottom.target = tBotLid
         blink.target = tBlink
+        bounceY.target = tBounceY
         eyeSpacing.target = tEyeSpacing
         eyeLiftY.target = tEyeLiftY
         red.target = CGFloat(tR)
@@ -1752,6 +1766,7 @@ final class AgentFaceEngine: ObservableObject {
         blink.update(dt: cgDT)
         mouthAmp.update(dt: cgDT)
         penAlpha.update(dt: cgDT)
+        bounceY.update(dt: cgDT)
         eyeSpacing.update(dt: cgDT)
         eyeLiftY.update(dt: cgDT)
         glowIntensity.update(dt: cgDT)
@@ -1765,16 +1780,16 @@ final class AgentFaceEngine: ObservableObject {
             let frac = Double(i) / Double(max(1, count))
             let h = FaceSaccade.hash01(Int(elapsed * 100) &+ i * 17)
             let ang = frac * .pi * 2 + h * 0.5
-            let spd = 22.0 + h * 30.0
+            let spd = 28.0 + h * 44.0
             sparkles.append(
                 SparkleParticle(
-                    x: CGFloat((h - 0.5) * 32),
-                    y: CGFloat((FaceSaccade.hash01(i &+ 9) - 0.5) * 14),
+                    x: CGFloat((h - 0.5) * 46),
+                    y: CGFloat((FaceSaccade.hash01(i &+ 9) - 0.5) * 18),
                     vx: CGFloat(cos(ang) * spd),
-                    vy: CGFloat(sin(ang) * spd - 10),
-                    size: CGFloat(1.8 + h * 1.8),
+                    vy: CGFloat(sin(ang) * spd - 12),
+                    size: CGFloat(2.2 + h * 2.2),
                     life: 0,
-                    maxLife: 0.60 + h * 0.30,
+                    maxLife: 0.65 + h * 0.35,
                     color: color
                 )
             )
@@ -1784,7 +1799,7 @@ final class AgentFaceEngine: ObservableObject {
     var areSpringsSettled: Bool {
         gazeX.isSettled && gazeY.isSettled && scaleX.isSettled && scaleY.isSettled
             && eyelidTop.isSettled && eyelidBottom.isSettled && inwardTilt.isSettled
-            && blink.isSettled && penAlpha.isSettled && sparkles.isEmpty
+            && bounceY.isSettled && blink.isSettled && penAlpha.isSettled && sparkles.isEmpty
     }
 }
 
@@ -1873,16 +1888,18 @@ struct AgentFaceCanvas: View {
     }
 
     private func frameInterval(for ctx: AgentFaceFrameContext) -> Double {
+        // 60fps during active animations / transitions (matches PoC requestAnimationFrame),
+        // dropping to calm 20fps in settled idle & 15fps in sleep.
         if ctx.reaction != nil || ctx.drag.active || ctx.gaze != nil || !engine.areSpringsSettled {
-            return 1.0 / 30.0
+            return 1.0 / 60.0
         }
         switch ctx.mood {
         case .working, .listening, .overheated:
-            return 1.0 / 30.0
+            return 1.0 / 60.0
         case .waiting, .done, .meeting, .onCallCam, .onCallMic, .strained, .idle, .sleepy, .lowBattery:
-            return 1.0 / 20.0
+            return 1.0 / 30.0
         case .sleep:
-            return 1.0 / 12.0
+            return 1.0 / 20.0
         }
     }
 
@@ -1900,7 +1917,7 @@ struct AgentFaceCanvas: View {
                 guard w > 0, h > 0 else { return }
 
                 let cx = w / 2
-                let eyeCenterY = h * 0.44 + engine.eyeLiftY.value
+                let eyeCenterY = h * 0.46 + engine.eyeLiftY.value + engine.bounceY.value
                 let reaction = frame.reaction?.reaction
                 let isPureMusic = frame.mood == .listening && reaction == nil && !frame.isMuted
                 let eyeColor = Color(
@@ -1908,11 +1925,17 @@ struct AgentFaceCanvas: View {
                     green: Double(min(max(engine.green.value, 0), 1)),
                     blue: Double(min(max(engine.blue.value, 0), 1))
                 )
+                let accentColor: Color = {
+                    if let tint = frame.musicTint {
+                        return Color(red: tint.r, green: tint.g, blue: tint.b)
+                    }
+                    return Color(red: 0.88, green: 0.61, blue: 0.42) // PoC warm peach accent
+                }()
 
-                // 1. Ambient Radial RMS Glow behind eyes (music-reactive without moving eyes!)
+                // 1. Ambient Radial RMS Glow behind eyes (exact PoC proportions)
                 let glow = max(0, Double(engine.glowIntensity.value))
                 if glow > 0.02 {
-                    let radius = 26 + glow * 26
+                    let radius = 38 + glow * 34
                     let glowRect = CGRect(
                         x: cx - radius,
                         y: eyeCenterY - radius,
@@ -1923,27 +1946,30 @@ struct AgentFaceCanvas: View {
                         Path(ellipseIn: glowRect),
                         with: .radialGradient(
                             Gradient(colors: [
-                                eyeColor.opacity(min(0.34, glow * 0.34)),
-                                eyeColor.opacity(0)
+                                accentColor.opacity(min(0.42, glow * 0.42)),
+                                accentColor.opacity(0)
                             ]),
                             center: CGPoint(x: cx, y: eyeCenterY),
-                            startRadius: 3,
+                            startRadius: 4,
                             endRadius: radius
                         )
                     )
                 }
 
-                // 2. Left (-1) & Right (+1) Eyes with 3D Spherical Foreshortening + Eyelids
+                // 2. Left (-1) & Right (+1) Eyes — 1:1 PoC size (19.0 x 32.5) + Bloom + 3D Foreshortening
                 let gx = engine.gazeX.value
                 let gy = engine.gazeY.value
                 let blinkVal = min(max(engine.blink.value, 0), 1)
                 let openY = max(0.08, 1.0 - blinkVal * 0.92)
-                let baseW: CGFloat = 15.2
-                let baseH: CGFloat = 26.2
+                let baseW: CGFloat = 19.0
+                let baseH: CGFloat = 32.5
                 let spacing = engine.eyeSpacing.value
                 let topLid = max(0, engine.eyelidTop.value)
                 let botLid = max(0, engine.eyelidBottom.value)
-                let lookRatio = max(-1, min(1, gx / 16.0))
+                let lookRatio = max(-1, min(1, gx / 19.0))
+                let shadowColor = (frame.musicListening && !frame.isMuted)
+                    ? accentColor.opacity(0.55)
+                    : Color(red: 0.89, green: 0.90, blue: 1.0).opacity(0.46)
 
                 for (index, side) in [-1.0, 1.0].enumerated() {
                     let sideF = CGFloat(side)
@@ -1954,7 +1980,7 @@ struct AgentFaceCanvas: View {
                     let ex = cx + gx + sideF * spacing * (1.0 - abs(lookRatio) * 0.05)
                     let ey = eyeCenterY + gy
                     let ew = baseW * engine.scaleX.value * widthPersp
-                    var eh = max(3.2, baseH * engine.scaleY.value * openY * depthScale)
+                    var eh = max(3.6, baseH * engine.scaleY.value * openY * depthScale)
 
                     if reaction == .curious {
                         eh *= (index == 0 ? 0.74 : 1.16)
@@ -1965,10 +1991,9 @@ struct AgentFaceCanvas: View {
                     eyeCtx.rotate(by: .radians(Double(sideF * -engine.inwardTilt.value)))
 
                     if reaction == .failed {
-                        // Expressive > < eyes for failed runs.
                         var chevron = Path()
-                        let hw = ew * 0.45
-                        let hh: CGFloat = 8.5
+                        let hw = ew * 0.48
+                        let hh: CGFloat = 10.0
                         if index == 0 {
                             chevron.move(to: CGPoint(x: -hw, y: -hh))
                             chevron.addLine(to: CGPoint(x: hw, y: 0))
@@ -1981,33 +2006,33 @@ struct AgentFaceCanvas: View {
                         eyeCtx.stroke(
                             chevron,
                             with: .color(eyeColor),
-                            style: StrokeStyle(lineWidth: 2.3, lineCap: .round, lineJoin: .round)
+                            style: StrokeStyle(lineWidth: 2.6, lineCap: .round, lineJoin: .round)
                         )
                         continue
                     }
 
-                    // Pill eye body with soft glow
+                    // Pill eye body with lush PoC bloom (shadowBlur 13 -> radius ~8)
                     let pillRect = CGRect(x: -ew / 2, y: -eh / 2, width: ew, height: eh)
                     let pillPath = Path(roundedRect: pillRect, cornerRadius: min(ew, eh) * 0.48)
                     eyeCtx.drawLayer { layerCtx in
-                        layerCtx.addFilter(.shadow(color: eyeColor.opacity(0.45), radius: 5, x: 0, y: 0))
+                        layerCtx.addFilter(.shadow(color: shadowColor, radius: 9, x: 0, y: 0))
                         layerCtx.fill(pillPath, with: .color(eyeColor))
                     }
 
                     // Starry highlight glint during AirPods / Charged connect
                     if reaction == .airpods || reaction == .charged {
-                        let glintRect = CGRect(x: -ew * 0.24, y: -eh * 0.28, width: 4.4, height: 4.4)
+                        let glintRect = CGRect(x: -ew * 0.28, y: -eh * 0.30, width: 5.2, height: 5.2)
                         eyeCtx.fill(Path(ellipseIn: glintRect), with: .color(.white))
                     }
 
-                    // Top Eyelid Curtain (Working focus, Rock fierce, Sleepy/Sleep, Mute)
+                    // Top Eyelid Curtain (Working focus, Rock fierce, Mute)
                     if topLid > 0.02 {
                         var lidCtx = eyeCtx
                         let browAng: Double = (frame.mood == .working || (isPureMusic && frame.musicVibe == .rock))
                             ? 0.17
-                            : (frame.mood == .overheated || (isPureMusic && frame.musicVibe == .melancholy) ? -0.15 : -0.06)
+                            : (frame.mood == .overheated || (isPureMusic && frame.musicVibe == .melancholy) ? -0.15 : -0.08)
                         lidCtx.rotate(by: .radians(Double(sideF) * browAng))
-                        let lidRect = CGRect(x: -ew, y: -eh / 2 - 5, width: ew * 2, height: eh * topLid * 1.10 + 5)
+                        let lidRect = CGRect(x: -ew, y: -eh / 2 - 6, width: ew * 2, height: eh * topLid * 1.12 + 6)
                         lidCtx.fill(Path(lidRect), with: .color(.black))
                     }
 
@@ -2023,34 +2048,34 @@ struct AgentFaceCanvas: View {
                             endAngle: .degrees(0),
                             clockwise: false
                         )
-                        arch.addLine(to: CGPoint(x: ew, y: eh + 4))
-                        arch.addLine(to: CGPoint(x: -ew, y: eh + 4))
+                        arch.addLine(to: CGPoint(x: ew, y: eh + 6))
+                        arch.addLine(to: CGPoint(x: -ew, y: eh + 6))
                         arch.closeSubpath()
                         eyeCtx.fill(arch, with: .color(.black))
                     }
                 }
 
-                // 3. Working Desk: 3-Phase Organic Multi-Harmonic Ink + Teardrop Quill Pen Nib
+                // 3. Working Desk: 1:1 PoC 44pt gap + 70pt span + glowing organic ink + 17.8pt quill nib
                 let penA = min(max(Double(engine.penAlpha.value), 0), 1)
                 if penA > 0.02 && reaction != .failed {
                     drawOrganicScribbleAndQuill(
                         in: &ctx,
                         cx: cx,
-                        deskY: min(h - 9, eyeCenterY + 33),
+                        deskY: min(h - 10, eyeCenterY + 44),
                         alpha: penA,
                         t: t,
                         color: eyeColor
                     )
                 }
 
-                // 4. Music Mouth: Vocal Humming Wave (Ballad/Chill/Groove) or 5-Bar Mini EQ (Hype/Rock)
+                // 4. Music Mouth: Vocal Humming Wave (accent glowing) or 5-Bar Mini EQ (Hype/Rock)
                 if isPureMusic && (frame.musicVibe == .hype || frame.musicVibe == .rock) {
                     drawMiniEqualizerMouth(
                         in: &ctx,
                         cx: cx,
-                        my: eyeCenterY + 23,
+                        my: eyeCenterY + 27,
                         bands: frame.musicMetrics.bands,
-                        color: eyeColor
+                        color: accentColor
                     )
                 } else {
                     let mAmp = max(0, CGFloat(engine.mouthAmp.value))
@@ -2058,10 +2083,10 @@ struct AgentFaceCanvas: View {
                         drawVocalHummingMouth(
                             in: &ctx,
                             cx: cx,
-                            baseY: eyeCenterY + 22,
+                            baseY: eyeCenterY + 27,
                             amp: mAmp,
                             t: t,
-                            color: eyeColor
+                            color: accentColor
                         )
                     }
                 }
@@ -2069,10 +2094,10 @@ struct AgentFaceCanvas: View {
                 // 5. Overheated sweat bead
                 if frame.mood == .overheated {
                     let phase = t.truncatingRemainder(dividingBy: 2.0) / 2.0
-                    let dropX = cx + spacing + 13
-                    let dropY = eyeCenterY - 10 + CGFloat(phase) * 16
+                    let dropX = cx + spacing + 16
+                    let dropY = eyeCenterY - 12 + CGFloat(phase) * 18
                     let alpha = sin(phase * .pi)
-                    let drop = CGRect(x: dropX - 2, y: dropY - 3, width: 4, height: 6)
+                    let drop = CGRect(x: dropX - 2.2, y: dropY - 3.2, width: 4.4, height: 6.4)
                     ctx.fill(
                         Path(ellipseIn: drop),
                         with: .color(Color(red: 0.52, green: 0.86, blue: 1.0).opacity(alpha * 0.9))
@@ -2083,7 +2108,7 @@ struct AgentFaceCanvas: View {
                 for z in engine.sleepZs {
                     let u = z.life / z.maxLife
                     let alpha = u < 0.2 ? (u / 0.2) : max(0, 1.0 - (u - 0.2) / 0.8)
-                    let fontSize = 9.0 + u * 4.5
+                    let fontSize = 10.0 + u * 5.0
                     let text = Text("z")
                         .font(.system(size: fontSize, weight: .semibold, design: .rounded))
                         .foregroundStyle(Color(red: 0.65, green: 0.71, blue: 0.99).opacity(alpha * 0.85))
@@ -2092,9 +2117,9 @@ struct AgentFaceCanvas: View {
 
                 // 7. Layer 3 Floating Badges (AirPods / Wi-Fi '?' / Mute)
                 if reaction == .airpods || reaction == .wifiLost || reaction == .mute {
-                    let bx = cx + 44
-                    let by = eyeCenterY - 10
-                    let badgeRect = CGRect(x: bx - 9.5, y: by - 9.5, width: 19, height: 19)
+                    let bx = cx + 52
+                    let by = eyeCenterY - 12
+                    let badgeRect = CGRect(x: bx - 11, y: by - 11, width: 22, height: 22)
                     ctx.fill(Path(ellipseIn: badgeRect), with: .color(.white.opacity(0.14)))
 
                     let symbol: String
@@ -2111,7 +2136,7 @@ struct AgentFaceCanvas: View {
                         tint = Color(red: 0.98, green: 0.44, blue: 0.52)
                     }
                     let label = Text(symbol)
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
                         .foregroundStyle(tint)
                     ctx.draw(label, at: CGPoint(x: bx, y: by))
                 }
@@ -2141,16 +2166,16 @@ struct AgentFaceCanvas: View {
         t: TimeInterval,
         color: Color
     ) {
-        let spanX: CGFloat = 58
+        let spanX: CGFloat = 70
         let startX = cx - spanX / 2
         let prog = max(0, min(1, engine.scribbleProg))
         let isReturn = engine.scribblePhase == .returning
         let isPause = engine.scribblePhase == .pause
         let inkFade = isReturn ? max(0, 1.0 - engine.scribbleReturnT * 1.25) : 1.0
 
-        // Organic Multi-Harmonic Ink Trail
+        // Organic Multi-Harmonic Ink Trail with soft glow
         if inkFade > 0.02 && (isReturn || prog > 0.01) {
-            let samples = 48
+            let samples = 56
             let startFrac = isReturn ? engine.scribbleReturnT * 0.45 : 0.0
             let endFrac = isReturn ? 1.0 : prog
             let minI = Int(floor(Double(samples) * startFrac))
@@ -2168,26 +2193,29 @@ struct AgentFaceCanvas: View {
                         trail.addLine(to: CGPoint(x: px, y: py))
                     }
                 }
-                ctx.stroke(
-                    trail,
-                    with: .color(color.opacity(alpha * 0.9 * inkFade)),
-                    style: StrokeStyle(lineWidth: 2.1, lineCap: .round, lineJoin: .round)
-                )
+                ctx.drawLayer { layerCtx in
+                    layerCtx.addFilter(.shadow(color: color.opacity(0.38 * alpha * inkFade), radius: 5, x: 0, y: 0))
+                    layerCtx.stroke(
+                        trail,
+                        with: .color(color.opacity(alpha * 0.92 * inkFade)),
+                        style: StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round)
+                    )
+                }
             }
         }
 
-        // True Teardrop Quill Pen Nib with Parabolic Return Arc + Subtle Wrist Jitter
+        // True Teardrop Quill Pen Nib (17.8pt) with Parabolic Return Arc + Glow
         let tipX = startX + CGFloat(prog) * spanX
         let waveY = OrganicScribble.sampleWave(u: prog, seed1: engine.scribbleSeed1, seed2: engine.scribbleSeed2)
         let liftY: CGFloat = {
-            if isPause { return -3.2 }
-            if isReturn { return CGFloat(-sin(engine.scribbleReturnT * .pi) * 12.5) }
+            if isPause { return -3.6 }
+            if isReturn { return CGFloat(-sin(engine.scribbleReturnT * .pi) * 14.5) }
             return 0
         }()
         let tipY = deskY + (isReturn ? 0 : waveY) + liftY
         let wristJitter: Double = {
             if engine.scribblePhase == .writing {
-                return sin(t * 28) * 0.10 + cos(t * 17) * 0.04
+                return sin(t * 32) * 0.11 + cos(t * 19) * 0.05
             }
             return isReturn ? -0.18 : 0.04
         }()
@@ -2199,26 +2227,28 @@ struct AgentFaceCanvas: View {
         var quill = Path()
         quill.move(to: .zero)
         quill.addCurve(
-            to: CGPoint(x: 0, y: -14.8),
-            control1: CGPoint(x: -4.8, y: -4.6),
-            control2: CGPoint(x: -4.5, y: -12.3)
+            to: CGPoint(x: 0, y: -17.8),
+            control1: CGPoint(x: -5.8, y: -5.5),
+            control2: CGPoint(x: -5.4, y: -14.8)
         )
         quill.addCurve(
             to: .zero,
-            control1: CGPoint(x: 4.5, y: -12.3),
-            control2: CGPoint(x: 4.8, y: -4.6)
+            control1: CGPoint(x: 5.4, y: -14.8),
+            control2: CGPoint(x: 5.8, y: -5.5)
         )
         quill.closeSubpath()
-        nibCtx.fill(quill, with: .color(color.opacity(alpha)))
+        nibCtx.drawLayer { layerCtx in
+            layerCtx.addFilter(.shadow(color: color.opacity(0.5 * alpha), radius: 6, x: 0, y: 0))
+            layerCtx.fill(quill, with: .color(color.opacity(alpha)))
+        }
 
-        // Quill nib center slit detail
         var slit = Path()
-        slit.move(to: CGPoint(x: 0, y: -1.0))
-        slit.addLine(to: CGPoint(x: 0, y: -6.5))
+        slit.move(to: CGPoint(x: 0, y: -1.2))
+        slit.addLine(to: CGPoint(x: 0, y: -7.8))
         nibCtx.stroke(
             slit,
-            with: .color(Color.black.opacity(0.60 * alpha)),
-            style: StrokeStyle(lineWidth: 1.0, lineCap: .round)
+            with: .color(Color.black.opacity(0.58 * alpha)),
+            style: StrokeStyle(lineWidth: 1.1, lineCap: .round)
         )
     }
 
@@ -2230,23 +2260,26 @@ struct AgentFaceCanvas: View {
         t: TimeInterval,
         color: Color
     ) {
-        let halfSpan = 19 + amp * 5.5
-        let waveH = 1.4 + amp * 5.5
+        let halfSpan = 24 + amp * 7
+        let waveH = 1.6 + amp * 7.5
         var wave = Path()
-        let steps = 32
+        let steps = 36
         for i in 0...steps {
             let u = Double(i) / Double(steps)
             let x = cx - halfSpan + CGFloat(u) * halfSpan * 2
             let win = sin(u * .pi)
-            let yOff = (sin(u * .pi * 4 - t * 9.5) * 0.72 + sin(u * .pi * 8 + t * 13) * 0.28) * Double(waveH) * win
+            let yOff = (sin(u * .pi * 4 - t * 11) * 0.72 + sin(u * .pi * 8 + t * 15) * 0.28) * Double(waveH) * win
             let pt = CGPoint(x: x, y: baseY + CGFloat(yOff))
             if i == 0 { wave.move(to: pt) } else { wave.addLine(to: pt) }
         }
-        ctx.stroke(
-            wave,
-            with: .color(color.opacity(min(1, Double(amp) * 1.15))),
-            style: StrokeStyle(lineWidth: 2.0, lineCap: .round, lineJoin: .round)
-        )
+        ctx.drawLayer { layerCtx in
+            layerCtx.addFilter(.shadow(color: color.opacity(0.72), radius: 7, x: 0, y: 0))
+            layerCtx.stroke(
+                wave,
+                with: .color(color.opacity(min(1, Double(amp) * 1.15))),
+                style: StrokeStyle(lineWidth: 2.3, lineCap: .round, lineJoin: .round)
+            )
+        }
     }
 
     private func drawMiniEqualizerMouth(
@@ -2257,10 +2290,10 @@ struct AgentFaceCanvas: View {
         color: Color
     ) {
         let count = 5
-        let barW: CGFloat = 2.6
-        let spacing: CGFloat = 4.2
+        let barW: CGFloat = 3.0
+        let spacing: CGFloat = 5.0
         let totalW = CGFloat(count - 1) * spacing
-        let maxH: CGFloat = 11.5
+        let maxH: CGFloat = 13.0
 
         for i in 0..<count {
             let level = i < bands.count ? bands[i] : 0.2
@@ -2276,11 +2309,16 @@ struct AgentFaceCanvas: View {
     }
 }
 
-// MARK: - Dropped Chin Container & Unified Mac Companion View
+// MARK: - Dropped Chin Container & Compact Music Wings (1:1 PoC Layout)
 
 struct AgentFaceDroppedChinView: View {
     let cameraWidth: CGFloat
     let cameraHeight: CGFloat
+    let isWorking: Bool
+    let showMusicWings: Bool
+    let albumArt: NSImage?
+    let musicAccent: Color
+    let audioEnvelopeProvider: () -> AsymmetricAudioEnvelope
     let meetingBadge: UpcomingMeetingCue?
     let onCallDotColor: Color?
     let trackCursor: Bool
@@ -2288,17 +2326,33 @@ struct AgentFaceDroppedChinView: View {
     let onMeetingTap: ((UpcomingMeetingCue) -> Void)?
     let contextProvider: (Date) -> AgentFaceFrameContext
 
-    static let faceHeight: CGFloat = 76
-    static let faceWidth: CGFloat = 144
+    private var faceHeight: CGFloat { isWorking ? 112 : 86 }
+    private var totalWidth: CGFloat { max(cameraWidth, showMusicWings ? 268 : 214) }
 
     var body: some View {
         VStack(spacing: 0) {
             Color.clear
-                .frame(width: max(Self.faceWidth, cameraWidth), height: cameraHeight)
+                .frame(width: totalWidth, height: cameraHeight)
 
             ZStack(alignment: .bottom) {
-                AgentFaceCanvas(contextProvider: contextProvider)
-                    .frame(width: Self.faceWidth, height: Self.faceHeight)
+                HStack(spacing: 0) {
+                    if showMusicWings {
+                        leftAlbumWing
+                            .frame(width: 32)
+                            .transition(.opacity.combined(with: .move(edge: .leading)))
+                    }
+
+                    AgentFaceCanvas(contextProvider: contextProvider)
+                        .frame(width: 204, height: faceHeight)
+
+                    if showMusicWings {
+                        rightMiniEQWing
+                            .frame(width: 32)
+                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    }
+                }
+                .animation(.spring(response: 0.38, dampingFraction: 0.82), value: showMusicWings)
+                .animation(.spring(response: 0.38, dampingFraction: 0.82), value: isWorking)
 
                 if let meetingBadge {
                     Button {
@@ -2317,7 +2371,7 @@ struct AgentFaceDroppedChinView: View {
                         .background(.white.opacity(0.12), in: Capsule())
                     }
                     .buttonStyle(.plain)
-                    .padding(.bottom, 4)
+                    .padding(.bottom, 5)
                     .help("\(meetingBadge.title) · Click to join")
                 }
             }
@@ -2325,8 +2379,8 @@ struct AgentFaceDroppedChinView: View {
                 if let onCallDotColor {
                     Circle()
                         .fill(onCallDotColor)
-                        .frame(width: 6.5, height: 6.5)
-                        .shadow(color: onCallDotColor.opacity(0.85), radius: 4)
+                        .frame(width: 7, height: 7)
+                        .shadow(color: onCallDotColor.opacity(0.9), radius: 5)
                         .padding(.top, 4)
                         .padding(.trailing, 8)
                 }
@@ -2334,6 +2388,51 @@ struct AgentFaceDroppedChinView: View {
             .overlay {
                 FaceTrackingOverlay(enabled: trackCursor, onGazeChanged: onGazeChanged)
             }
+        }
+    }
+
+    private var leftAlbumWing: some View {
+        Group {
+            if let albumArt {
+                Image(nsImage: albumArt)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                LinearGradient(
+                    colors: [musicAccent, musicAccent.opacity(0.45)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .overlay {
+                    Image(systemName: "music.note")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+            }
+        }
+        .frame(width: 24, height: 24)
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .shadow(color: musicAccent.opacity(0.45), radius: 6)
+    }
+
+    private var rightMiniEQWing: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { _ in
+            let env = audioEnvelopeProvider()
+            let vals = [
+                env.envBass,
+                env.envMid,
+                env.envHigh,
+                (env.envBass + env.envMid) * 0.55
+            ]
+            HStack(alignment: .bottom, spacing: 2.5) {
+                ForEach(0..<4, id: \.self) { idx in
+                    let h = 3.5 + min(14.5, vals[idx] * 16.5)
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(musicAccent)
+                        .frame(width: 2.5, height: CGFloat(h))
+                }
+            }
+            .frame(height: 18, alignment: .bottom)
         }
     }
 }
@@ -2360,6 +2459,9 @@ struct DevAgentFaceLiveActivity: View {
         let meeting = reactToCalendar
             ? MacFaceInputs.upcomingMeeting(from: calendar.events, now: now)
             : nil
+        let isWorkingNow = devStore.items.contains(where: { $0.status == .run })
+        let showMusicWings = reactToMusic && music.isPlaying && !observer.isAudioMuted
+        let musicAccent = resolvedMusicAccentColor()
         let onCallColor: Color? = {
             guard reactToSystem else { return nil }
             if observer.isCameraActive { return Color(red: 0.29, green: 0.87, blue: 0.50) }
@@ -2370,6 +2472,11 @@ struct DevAgentFaceLiveActivity: View {
         AgentFaceDroppedChinView(
             cameraWidth: vm.closedNotchSize.width,
             cameraHeight: cameraHeight,
+            isWorking: isWorkingNow,
+            showMusicWings: showMusicWings,
+            albumArt: music.albumArt,
+            musicAccent: musicAccent,
+            audioEnvelopeProvider: { observer.currentAudioEnvelope },
             meetingBadge: meeting,
             onCallDotColor: onCallColor,
             trackCursor: trackCursor,
@@ -2413,8 +2520,6 @@ struct DevAgentFaceLiveActivity: View {
                 let (musicMetrics, audioEnv, musicVibe) = observer.sampleAudioMetrics(at: t, isPlaying: isVibing)
                 let musicTint = resolvedMusicTint(isVibing: isVibing)
                 let reaction = resolvedReaction(at: date)
-
-                // 1.5s stillness auto-reset on idle proximity cursor gaze.
                 let freshGaze: CGPoint? = (trackCursor && date.timeIntervalSince(lastGazeMoveAt) < 1.5) ? gaze : nil
 
                 return AgentFaceFrameContext(
@@ -2453,6 +2558,13 @@ struct DevAgentFaceLiveActivity: View {
         }
     }
 
+    private func resolvedMusicAccentColor() -> Color {
+        if let tint = resolvedMusicTint(isVibing: true) {
+            return Color(red: tint.r, green: tint.g, blue: tint.b)
+        }
+        return Color(red: 0.88, green: 0.61, blue: 0.42)
+    }
+
     private func resolvedMusicTint(isVibing: Bool) -> (r: Double, g: Double, b: Double)? {
         guard isVibing, playerColorTinting else { return nil }
         guard let rgb = music.avgColor.usingColorSpace(.sRGB) else { return nil }
@@ -2474,8 +2586,8 @@ struct IdleAgentFaceView: View {
 
 /// Legacy preview/component wrapper kept for source compatibility.
 struct AnimatedFace: View {
-    var height: CGFloat = 76
-    var width: CGFloat = 144
+    var height: CGFloat = 112
+    var width: CGFloat = 204
     var mood: AgentFaceMood = .idle
 
     var body: some View {
