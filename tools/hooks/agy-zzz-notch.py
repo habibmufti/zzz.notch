@@ -5,20 +5,27 @@ Configure in ~/.gemini/config/hooks.json (global) or .agents/hooks.json (workspa
 Reads Antigravity's camelCase hook payload from stdin, fires `zzz` asynchronously
 so the synchronous hook never stalls the agent loop, and prints the required
 JSON response to stdout.
+
+Subagents (transcripts starting with a SYSTEM_MESSAGE bearing `sender=<parent>`)
+do not spawn their own mascot; instead they aggregate into the parent session's
+`--agents` badge and `--agent-list` card section. On `Stop`, completed sessions
+emit a single `ok`/`fail` result (4s celebration then auto-dismiss) instead of
+lingering as `idle` forever.
 """
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 ZZZ = os.environ.get("ZZZ_BIN") or os.path.join(os.path.expanduser("~"), ".local/bin/zzz")
 DETAIL_INTERVAL_S = 0.8
@@ -60,6 +67,8 @@ MD_NOISE_RE = re.compile(r"[`*_#>]")
 SPACE_RE = re.compile(r"\s+")
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n")
 MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+SUBAGENT_SENDER_RE = re.compile(r"\[Message\][^\n]*\bsender=([0-9a-fA-F-]{8,})")
+SUBAGENT_CONTENT_RE = re.compile(r"\[Message\][^\n]*\bcontent=(.+)", re.DOTALL)
 
 
 def one_line(text: str, limit: int) -> str:
@@ -141,6 +150,46 @@ def context_window_for(model: str) -> int:
     return 200_000
 
 
+def inspect_transcript_origin(transcript_path: str) -> tuple[bool | None, str | None, str]:
+    """Read step 0 of transcript.jsonl to distinguish main agent vs subagent.
+
+    Returns (is_subagent, parent_conversation_id, task_snippet).
+    """
+    if not transcript_path:
+        return None, None, ""
+    p = Path(transcript_path)
+    if not p.is_file():
+        return None, None, ""
+    try:
+        with p.open("r", encoding="utf-8", errors="ignore") as f:
+            first_line = f.readline().strip()
+    except Exception:
+        return None, None, ""
+    if not first_line:
+        return None, None, ""
+    try:
+        entry = json.loads(first_line)
+    except Exception:
+        return None, None, ""
+
+    entry_type = str(entry.get("type") or "")
+    entry_source = str(entry.get("source") or "")
+    if entry_type == "USER_INPUT" or entry_source == "USER_EXPLICIT":
+        return False, None, ""
+    if entry_type == "SYSTEM_MESSAGE" or entry_source == "SYSTEM":
+        content = str(entry.get("content") or "")
+        sender_match = SUBAGENT_SENDER_RE.search(content)
+        parent_id = sender_match.group(1) if sender_match else None
+        task = ""
+        content_match = SUBAGENT_CONTENT_RE.search(content)
+        if content_match:
+            raw_task = content_match.group(1).split("</SYSTEM_MESSAGE>", 1)[0].strip()
+            first_para = raw_task.splitlines()[0].strip() if raw_task else ""
+            task = one_line(first_para, 80)
+        return True, parent_id, task
+    return None, None, ""
+
+
 def transcript_metrics(transcript_path: str) -> tuple[str | None, int | None]:
     """Read tail of transcript.jsonl once to get (final_summary, context_percent)."""
     if not transcript_path:
@@ -210,6 +259,25 @@ def state_file_path(session_id: str) -> Path:
     return Path(f"/tmp/zzz-agy-{uid}-{safe}.json")
 
 
+@contextlib.contextmanager
+def state_lock(path: Path) -> Iterator[None]:
+    lock_path = path.with_suffix(".lock")
+    fd = None
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    except Exception:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            except Exception:
+                pass
+
+
 def load_state(path: Path) -> dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -222,6 +290,14 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
         path.write_text(json.dumps(state), encoding="utf-8")
     except Exception:
         pass
+
+
+def cleanup_state(path: Path) -> None:
+    for target in (path, path.with_suffix(".lock")):
+        try:
+            target.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def activity_of(tool: str, args: dict[str, Any]) -> str:
@@ -273,6 +349,17 @@ def describe_tool(tool: str, args: dict[str, Any], root: str) -> tuple[str, str,
     now = NOW_LABELS.get(tool, f"Using {tool}")
     detail = one_line(f"{tool}: {target}" if target else tool, 120)
     return detail, now, "", one_line(target, 160)
+
+
+def subagent_extra_args(state: dict[str, Any]) -> list[str]:
+    active = state.get("active_subagents")
+    if not isinstance(active, dict):
+        return ["--agents", "0"]
+    labels = [str(v) for v in active.values() if isinstance(v, str) and v.strip()]
+    args = ["--agents", str(len(active))]
+    if labels:
+        args.extend(["--agent-list", "\n".join(labels)])
+    return args
 
 
 def build_notify_args(
@@ -332,30 +419,83 @@ def fire_async(cmd: list[str]) -> None:
     )
 
 
-def fire_sequence_async(first: list[str], second: list[str], delay_s: float = 0.25) -> None:
-    if os.environ.get("ZZZ_DRY_RUN"):
-        subprocess.run(first, stdout=sys.stderr, check=False)
-        subprocess.run(second, stdout=sys.stderr, check=False)
-        return
-    if not os.path.exists(ZZZ):
-        return
-    script = (
-        f"{' '.join(shlex.quote(a) for a in first)} >/dev/null 2>&1; "
-        f"sleep {delay_s}; "
-        f"{' '.join(shlex.quote(a) for a in second)} >/dev/null 2>&1"
-    )
-    subprocess.Popen(
-        ["/bin/sh", "-c", script],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        close_fds=True,
-    )
+def update_parent_subagent(
+    parent_conv_id: str,
+    sub_conv_id: str,
+    adding: bool,
+    fallback_task: str,
+    project: str,
+    app_bundle: str,
+    action_url: str,
+) -> None:
+    """Register or unregister a subagent on its parent session's badge/card."""
+    parent_sid = f"agy-{parent_conv_id[:12]}"
+    parent_path = state_file_path(parent_sid)
+
+    with state_lock(parent_path):
+        parent_state = load_state(parent_path)
+        if not parent_state:
+            return
+        active = parent_state.get("active_subagents")
+        if not isinstance(active, dict):
+            active = {}
+
+        changed = False
+        if adding:
+            if sub_conv_id not in active:
+                pending = parent_state.get("pending_subagents")
+                label = ""
+                if isinstance(pending, list) and pending:
+                    label = str(pending.pop(0))
+                    parent_state["pending_subagents"] = pending
+                if not label:
+                    label = f"Subagent · {fallback_task}" if fallback_task else "Subagent"
+                active[sub_conv_id] = label
+                changed = True
+        else:
+            if sub_conv_id in active:
+                active.pop(sub_conv_id, None)
+                changed = True
+
+        if not changed:
+            return
+
+        parent_state["active_subagents"] = active
+        save_state(parent_path, parent_state)
+
+        parent_status = str(parent_state.get("status") or "")
+        if parent_status not in ("run", "wait"):
+            return
+
+        parent_project = str(parent_state.get("project") or project)
+        parent_bundle = str(parent_state.get("app_bundle") or app_bundle)
+        parent_url = str(parent_state.get("action_url") or action_url)
+        parent_pid = parent_state.get("pid") if isinstance(parent_state.get("pid"), int) else None
+        parent_prompt = str(parent_state.get("prompt") or "")
+        extra = subagent_extra_args(parent_state)
+        if parent_prompt:
+            extra.extend(["--prompt", parent_prompt])
+        fire_async(
+            build_notify_args(
+                parent_project,
+                "Working",
+                parent_status,
+                parent_sid,
+                parent_bundle,
+                action_url=parent_url,
+                host_pid=parent_pid,
+                extra=extra,
+            )
+        )
 
 
 def handle_event(payload: dict[str, Any]) -> None:
     event = str(payload.get("hookEventName") or "")
+    # Defer displaying a session until PreInvocation so empty/subagent sessions
+    # never flash as top-level mascots on SessionStart.
+    if event == "SessionStart":
+        return
+
     conv_id = str(payload.get("conversationId") or os.getppid())
     session_id = f"agy-{conv_id[:12]}"
     root = workspace_root(payload)
@@ -365,115 +505,194 @@ def handle_event(payload: dict[str, Any]) -> None:
     transcript = str(payload.get("transcriptPath") or "")
 
     st_path = state_file_path(session_id)
-    state = load_state(st_path)
     now_ts = time.monotonic()
 
-    host_pid: int | None = state.get("pid") if isinstance(state.get("pid"), int) else detect_host_pid()
-    if host_pid:
-        state["pid"] = host_pid
+    with state_lock(st_path):
+        state = load_state(st_path)
 
-    prompt_raw = payload.get("lastUserInput")
-    prompt = one_line(prompt_raw, 160) if isinstance(prompt_raw, str) and prompt_raw.strip() else state.get("prompt", "")
-
-    def make(body: str, status: str, context_pct: int | None = None, extra: list[str] | None = None) -> list[str]:
-        return build_notify_args(
-            project,
-            body,
-            status,
-            session_id,
-            app_bundle,
-            action_url=action_url,
-            host_pid=host_pid,
-            context_pct=context_pct,
-            extra=extra,
+        prompt_raw = payload.get("lastUserInput")
+        prompt = (
+            one_line(prompt_raw, 160)
+            if isinstance(prompt_raw, str) and prompt_raw.strip()
+            else str(state.get("prompt") or "")
         )
 
-    if event == "SessionStart":
-        state.update({"status": "idle", "last_ts": now_ts, "prompt": prompt})
-        save_state(st_path, state)
-        fire_async(make("Idle", "idle"))
-        return
+        # Classify main agent vs subagent once from transcript step 0.
+        if state.get("is_subagent") is None:
+            is_sub, parent_id, sub_task = inspect_transcript_origin(transcript)
+            if is_sub is not None:
+                state["is_subagent"] = is_sub
+                if parent_id:
+                    state["parent_conv_id"] = parent_id
+                if sub_task:
+                    state["subagent_task"] = sub_task
+            elif not prompt:
+                # No user input and transcript hasn't written a USER_INPUT step:
+                # treat as non-user / subagent session and never spawn a card.
+                return
 
-    if event == "PreInvocation":
-        prev_status = state.get("status")
-        prev_prompt = state.get("prompt", "")
-        if prev_status == "run" and prev_prompt == prompt and (now_ts - float(state.get("last_ts", 0))) < DETAIL_INTERVAL_S:
-            return
-        _, ctx_pct = transcript_metrics(transcript)
-        state.update({"status": "run", "last_ts": now_ts, "prompt": prompt})
-        save_state(st_path, state)
-        extra = ["--prompt", prompt] if prompt else []
-        fire_async(make("Working", "run", context_pct=ctx_pct, extra=extra))
-        return
-
-    if event == "PreToolUse":
-        tool_call = payload.get("toolCall") or {}
-        tool = str(tool_call.get("name") or "")
-        args = tool_call.get("args") if isinstance(tool_call.get("args"), dict) else {}
-
-        if tool == "ask_question":
-            questions = args.get("questions")
-            q_text = "Waiting for your answer"
-            if isinstance(questions, list) and questions and isinstance(questions[0], dict):
-                q = questions[0].get("question")
-                if isinstance(q, str) and q.strip():
-                    q_text = one_line(q, 140)
-            state.update({"status": "wait", "last_ts": now_ts, "prompt": prompt})
-            save_state(st_path, state)
-            extra = ["--prompt", prompt] if prompt else []
-            fire_async(make(q_text, "wait", extra=extra))
+        if state.get("is_subagent") is True:
+            parent_conv_id = str(state.get("parent_conv_id") or "")
+            sub_task = str(state.get("subagent_task") or "")
+            if event == "Stop":
+                cleanup_state(st_path)
+            else:
+                save_state(st_path, state)
+            if parent_conv_id:
+                update_parent_subagent(
+                    parent_conv_id=parent_conv_id,
+                    sub_conv_id=conv_id,
+                    adding=(event != "Stop"),
+                    fallback_task=sub_task,
+                    project=project,
+                    app_bundle=app_bundle,
+                    action_url=action_url,
+                )
             return
 
-        if state.get("status") == "run" and (now_ts - float(state.get("last_ts", 0))) < DETAIL_INTERVAL_S:
-            return
+        host_pid: int | None = state.get("pid") if isinstance(state.get("pid"), int) else detect_host_pid()
+        if host_pid:
+            state["pid"] = host_pid
+        state["project"] = project
+        if app_bundle:
+            state["app_bundle"] = app_bundle
+        if action_url:
+            state["action_url"] = action_url
 
-        detail, now_label, intent, command = describe_tool(tool, args, root)
-        activity = activity_of(tool, args)
-        extra = ["--detail", detail, "--activity", activity, "--now", now_label]
-        if intent:
-            extra.extend(["--intent", intent])
-        if command:
-            extra.extend(["--command", command])
-        if prompt:
-            extra.extend(["--prompt", prompt])
+        def make(body: str, status: str, context_pct: int | None = None, extra: list[str] | None = None) -> list[str]:
+            combined = list(subagent_extra_args(state))
+            if extra:
+                combined.extend(extra)
+            return build_notify_args(
+                project,
+                body,
+                status,
+                session_id,
+                app_bundle,
+                action_url=action_url,
+                host_pid=host_pid,
+                context_pct=context_pct,
+                extra=combined,
+            )
 
-        state.update({"status": "run", "last_ts": now_ts, "prompt": prompt})
-        save_state(st_path, state)
-        fire_async(make("Working", "run", extra=extra))
-        return
-
-    if event == "PostToolUse":
-        tool_call = payload.get("toolCall") or {}
-        if tool_call.get("name") == "ask_question":
+        if event == "PreInvocation":
+            prev_status = state.get("status")
+            prev_prompt = state.get("prompt", "")
+            if prev_status == "run" and prev_prompt == prompt and (now_ts - float(state.get("last_ts", 0))) < DETAIL_INTERVAL_S:
+                return
+            _, ctx_pct = transcript_metrics(transcript)
             state.update({"status": "run", "last_ts": now_ts, "prompt": prompt})
             save_state(st_path, state)
             extra = ["--prompt", prompt] if prompt else []
+            fire_async(make("Working", "run", context_pct=ctx_pct, extra=extra))
+            return
+
+        if event == "PreToolUse":
+            tool_call = payload.get("toolCall") or {}
+            tool = str(tool_call.get("name") or "")
+            args = tool_call.get("args") if isinstance(tool_call.get("args"), dict) else {}
+
+            if tool == "ask_question":
+                questions = args.get("questions")
+                q_text = "Waiting for your answer"
+                if isinstance(questions, list) and questions and isinstance(questions[0], dict):
+                    q = questions[0].get("question")
+                    if isinstance(q, str) and q.strip():
+                        q_text = one_line(q, 140)
+                state.update({"status": "wait", "last_ts": now_ts, "prompt": prompt})
+                save_state(st_path, state)
+                extra = ["--prompt", prompt] if prompt else []
+                fire_async(make(q_text, "wait", extra=extra))
+                return
+
+            if tool == "invoke_subagent":
+                role = one_line(str(args.get("Role") or args.get("TypeName") or "Subagent"), 60)
+                sub_prompt = one_line(str(args.get("Prompt") or ""), 70)
+                label = f"{role} · {sub_prompt}" if sub_prompt else role
+                pending = state.get("pending_subagents")
+                if not isinstance(pending, list):
+                    pending = []
+                pending.append(label)
+                state["pending_subagents"] = pending[-20:]
+                save_state(st_path, state)
+
+            if state.get("status") == "run" and (now_ts - float(state.get("last_ts", 0))) < DETAIL_INTERVAL_S:
+                return
+
+            detail, now_label, intent, command = describe_tool(tool, args, root)
+            activity = activity_of(tool, args)
+            extra = ["--detail", detail, "--activity", activity, "--now", now_label]
+            if intent:
+                extra.extend(["--intent", intent])
+            if command:
+                extra.extend(["--command", command])
+            if prompt:
+                extra.extend(["--prompt", prompt])
+
+            state.update({"status": "run", "last_ts": now_ts, "prompt": prompt})
+            save_state(st_path, state)
             fire_async(make("Working", "run", extra=extra))
-        return
+            return
 
-    if event == "Stop":
-        reason = str(payload.get("terminationReason") or "")
-        error = str(payload.get("error") or "").strip()
-        summary_text, ctx_pct = transcript_metrics(transcript)
+        if event == "PostToolUse":
+            tool_call = payload.get("toolCall") or {}
+            if tool_call.get("name") == "ask_question":
+                state.update({"status": "run", "last_ts": now_ts, "prompt": prompt})
+                save_state(st_path, state)
+                extra = ["--prompt", prompt] if prompt else []
+                fire_async(make("Working", "run", extra=extra))
+            return
 
-        state.update({"status": "idle", "last_ts": now_ts, "prompt": prompt})
-        save_state(st_path, state)
-        extra = ["--prompt", prompt] if prompt else []
+        if event == "Stop":
+            reason = str(payload.get("terminationReason") or "")
+            error = str(payload.get("error") or "").strip()
+            fully_idle = payload.get("fullyIdle")
+            summary_text, ctx_pct = transcript_metrics(transcript)
+            extra = ["--prompt", prompt] if prompt else []
 
-        if reason == "ERROR" or error:
-            msg = one_line(error or "Execution error", 140)
-            fire_sequence_async(
-                make(msg, "fail", context_pct=ctx_pct, extra=extra),
-                make(msg, "idle", context_pct=ctx_pct, extra=extra),
-            )
-        elif reason == "USER_CANCELED":
-            fire_async(make("Canceled", "idle", context_pct=ctx_pct, extra=extra))
-        else:
-            summary = summary_text or "Done"
-            fire_sequence_async(
-                make(summary, "ok", context_pct=ctx_pct, extra=extra),
-                make(summary, "idle", context_pct=ctx_pct, extra=extra),
-            )
+            if fully_idle is False and reason not in ("ERROR", "USER_CANCELED") and not error:
+                state.update({"status": "run", "last_ts": now_ts, "prompt": prompt})
+                save_state(st_path, state)
+                extra.extend(["--now", "Waiting on background tasks"])
+                fire_async(make("Waiting on background tasks", "run", context_pct=ctx_pct, extra=extra))
+                return
+
+            # Antigravity has no SessionEnd hook and shares one daemon PID across
+            # chats, so emit a terminal result (4s celebration then auto-dismiss)
+            # instead of leaving an idle card behind for an hour.
+            cleanup_state(st_path)
+            if reason == "ERROR" or error:
+                msg = one_line(error or "Execution error", 140)
+                fire_async(
+                    build_notify_args(
+                        project,
+                        msg,
+                        "fail",
+                        session_id,
+                        app_bundle,
+                        action_url=action_url,
+                        host_pid=host_pid,
+                        context_pct=ctx_pct,
+                        extra=extra,
+                    )
+                )
+            elif reason == "USER_CANCELED":
+                fire_async([ZZZ, "clear", "--id", session_id])
+            else:
+                summary = summary_text or "Done"
+                fire_async(
+                    build_notify_args(
+                        project,
+                        summary,
+                        "ok",
+                        session_id,
+                        app_bundle,
+                        action_url=action_url,
+                        host_pid=host_pid,
+                        context_pct=ctx_pct,
+                        extra=extra,
+                    )
+                )
 
 
 def response_for(event: str) -> dict[str, Any]:
