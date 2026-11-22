@@ -15,7 +15,11 @@ final class SystemUsageMonitor: ObservableObject {
 
     @Published private(set) var snapshot: SystemUsageSnapshot = .initial
     @Published private(set) var cpuHistory: [Double] = []
+    @Published private(set) var networkHistory: [NetworkSamplePoint] = []
     @Published private(set) var peakNetworkRate: Double = 0
+    @Published private(set) var topCPUProcesses: [TopProcessItem] = []
+    @Published private(set) var topMemoryProcesses: [TopProcessItem] = []
+    @Published private(set) var isLoadingTopProcesses = false
 
     private let sampler: SystemUsageSampler
     private let historyLimit: Int
@@ -26,9 +30,11 @@ final class SystemUsageMonitor: ObservableObject {
     private var activeConsumers: Set<UUID> = []
     private var pollingTask: Task<Void, Never>?
     private var cooldownResetTask: Task<Void, Never>?
+    private var topProcessTask: Task<Void, Never>?
 
     var isPolling: Bool { pollingTask != nil }
     var activeConsumerCount: Int { activeConsumers.count }
+    var historyCapacity: Int { historyLimit }
 
     init(
         sampler: SystemUsageSampler = SystemUsageSampler(),
@@ -104,6 +110,9 @@ final class SystemUsageMonitor: ObservableObject {
     private func stopPolling() {
         pollingTask?.cancel()
         pollingTask = nil
+        topProcessTask?.cancel()
+        topProcessTask = nil
+        isLoadingTopProcesses = false
 
         let cooldown = self.resetCooldownSeconds
         cooldownResetTask?.cancel()
@@ -112,7 +121,36 @@ final class SystemUsageMonitor: ObservableObject {
             guard !Task.isCancelled, let self, self.activeConsumers.isEmpty else { return }
             self.snapshot = .initial
             self.cpuHistory.removeAll()
+            self.networkHistory.removeAll()
             self.peakNetworkRate = 0
+            self.topCPUProcesses.removeAll()
+            self.topMemoryProcesses.removeAll()
+        }
+    }
+
+    /// One-shot, on-demand snapshot of the top 3 CPU or Memory processes.
+    /// Never runs on a timer so background/idle cost stays strictly zero.
+    func refreshTopProcesses(for kind: SystemProcessKind) {
+        topProcessTask?.cancel()
+        isLoadingTopProcesses = true
+        let sampler = self.sampler
+
+        topProcessTask = Task { [weak self] in
+            let items: [TopProcessItem]
+            switch kind {
+            case .cpu:
+                items = await sampler.sampleTopCPUProcesses(limit: 3)
+            case .memory:
+                items = await sampler.sampleTopMemoryProcesses(limit: 3)
+            }
+            guard !Task.isCancelled, let self else { return }
+            switch kind {
+            case .cpu:
+                self.topCPUProcesses = items
+            case .memory:
+                self.topMemoryProcesses = items
+            }
+            self.isLoadingTopProcesses = false
         }
     }
 
@@ -139,6 +177,15 @@ final class SystemUsageMonitor: ObservableObject {
         cpuHistory.append(next.cpu.totalPercent)
         if cpuHistory.count > historyLimit {
             cpuHistory.removeFirst(cpuHistory.count - historyLimit)
+        }
+        networkHistory.append(
+            NetworkSamplePoint(
+                downloadBytesPerSecond: next.network.downloadBytesPerSecond,
+                uploadBytesPerSecond: next.network.uploadBytesPerSecond
+            )
+        )
+        if networkHistory.count > historyLimit {
+            networkHistory.removeFirst(networkHistory.count - historyLimit)
         }
         peakNetworkRate = max(peakNetworkRate, next.network.peakRate)
     }

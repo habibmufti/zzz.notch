@@ -13,7 +13,13 @@ struct CPUTicks: Equatable, Sendable {
     let system: UInt64
     let idle: UInt64
 
-    static func deltaUsage(from previous: CPUTicks, to current: CPUTicks, loadAverage1m: Double?) -> CPUUsage {
+    static func deltaUsage(
+        from previous: CPUTicks,
+        to current: CPUTicks,
+        loadAverage1m: Double?,
+        loadAverage5m: Double? = nil,
+        loadAverage15m: Double? = nil
+    ) -> CPUUsage {
         let dUser = current.user >= previous.user ? current.user - previous.user : 0
         let dNice = current.nice >= previous.nice ? current.nice - previous.nice : 0
         let dSystem = current.system >= previous.system ? current.system - previous.system : 0
@@ -21,13 +27,25 @@ struct CPUTicks: Equatable, Sendable {
 
         let total = dUser + dNice + dSystem + dIdle
         guard total > 0 else {
-            return CPUUsage(userPercent: 0, systemPercent: 0, loadAverage1m: loadAverage1m)
+            return CPUUsage(
+                userPercent: 0,
+                systemPercent: 0,
+                loadAverage1m: loadAverage1m,
+                loadAverage5m: loadAverage5m,
+                loadAverage15m: loadAverage15m
+            )
         }
 
         let totalDouble = Double(total)
         let userPct = min(max(Double(dUser + dNice) / totalDouble * 100, 0), 100)
         let systemPct = min(max(Double(dSystem) / totalDouble * 100, 0), max(0, 100 - userPct))
-        return CPUUsage(userPercent: userPct, systemPercent: systemPct, loadAverage1m: loadAverage1m)
+        return CPUUsage(
+            userPercent: userPct,
+            systemPercent: systemPct,
+            loadAverage1m: loadAverage1m,
+            loadAverage5m: loadAverage5m,
+            loadAverage15m: loadAverage15m
+        )
     }
 }
 
@@ -39,6 +57,17 @@ struct InterfaceByteCounters: Equatable, Sendable {
 struct NetworkCounterSnapshot: Equatable, Sendable {
     let interfaces: [String: InterfaceByteCounters]
     let uptime: TimeInterval
+    let localIPs: [String: String]
+
+    init(
+        interfaces: [String: InterfaceByteCounters],
+        uptime: TimeInterval,
+        localIPs: [String: String] = [:]
+    ) {
+        self.interfaces = interfaces
+        self.uptime = uptime
+        self.localIPs = localIPs
+    }
 
     static func deltaUsage(
         from previous: NetworkCounterSnapshot,
@@ -46,10 +75,12 @@ struct NetworkCounterSnapshot: Equatable, Sendable {
     ) -> NetworkUsage {
         let elapsed = current.uptime - previous.uptime
         guard elapsed > 0.05 else {
+            let iface = current.primaryInterfaceName
             return NetworkUsage(
                 downloadBytesPerSecond: 0,
                 uploadBytesPerSecond: 0,
-                activeInterface: current.primaryInterfaceName
+                activeInterface: iface,
+                localIP: iface.flatMap { current.localIPs[$0] }
             )
         }
 
@@ -60,8 +91,7 @@ struct NetworkCounterSnapshot: Equatable, Sendable {
 
         for (name, now) in current.interfaces {
             guard let prev = previous.interfaces[name] else { continue }
-            // if_data counters are UInt32 and wrap around every ~4 GiB; clamp
-            // wraparounds or interface resets to 0 instead of reporting spikes.
+            // Guard against counter resets / interface renegotiations instead of underflowing.
             let dIn = now.inBytes >= prev.inBytes ? now.inBytes - prev.inBytes : 0
             let dOut = now.outBytes >= prev.outBytes ? now.outBytes - prev.outBytes : 0
             totalIn += dIn
@@ -74,10 +104,12 @@ struct NetworkCounterSnapshot: Equatable, Sendable {
             }
         }
 
+        let activeInterface = busiestInterface ?? current.primaryInterfaceName
         return NetworkUsage(
             downloadBytesPerSecond: Double(totalIn) / elapsed,
             uploadBytesPerSecond: Double(totalOut) / elapsed,
-            activeInterface: busiestInterface ?? current.primaryInterfaceName
+            activeInterface: activeInterface,
+            localIP: activeInterface.flatMap { current.localIPs[$0] }
         )
     }
 
@@ -105,15 +137,27 @@ actor SystemUsageSampler {
     func sample() -> SystemUsageSnapshot {
         let nowUptime = ProcessInfo.processInfo.systemUptime
         let cpuTicks = Self.readCPUTicks()
-        let loadAvg = Self.readLoadAverage1m()
+        let loads = Self.readLoadAverages()
 
         let cpu: CPUUsage
         let hasCPUDelta: Bool
         if let prev = previousCPU, let curr = cpuTicks {
-            cpu = CPUTicks.deltaUsage(from: prev, to: curr, loadAverage1m: loadAvg)
+            cpu = CPUTicks.deltaUsage(
+                from: prev,
+                to: curr,
+                loadAverage1m: loads?.0,
+                loadAverage5m: loads?.1,
+                loadAverage15m: loads?.2
+            )
             hasCPUDelta = true
         } else {
-            cpu = CPUUsage(userPercent: 0, systemPercent: 0, loadAverage1m: loadAvg)
+            cpu = CPUUsage(
+                userPercent: 0,
+                systemPercent: 0,
+                loadAverage1m: loads?.0,
+                loadAverage5m: loads?.1,
+                loadAverage15m: loads?.2
+            )
             hasCPUDelta = false
         }
         if let curr = cpuTicks {
@@ -129,10 +173,12 @@ actor SystemUsageSampler {
             network = NetworkCounterSnapshot.deltaUsage(from: prev, to: curr)
             hasNetDelta = true
         } else {
+            let iface = netCounters?.primaryInterfaceName
             network = NetworkUsage(
                 downloadBytesPerSecond: 0,
                 uploadBytesPerSecond: 0,
-                activeInterface: netCounters?.primaryInterfaceName
+                activeInterface: iface,
+                localIP: iface.flatMap { netCounters?.localIPs[$0] }
             )
             hasNetDelta = false
         }
@@ -157,6 +203,50 @@ actor SystemUsageSampler {
             battery: battery,
             hasDeltaSample: hasCPUDelta || hasNetDelta
         )
+    }
+
+    func sampleTopMemoryProcesses(limit: Int = 3) -> [TopProcessItem] {
+        Self.readTopMemoryProcesses(limit: limit)
+    }
+
+    func sampleTopCPUProcesses(limit: Int = 3, sampleWindowSeconds: Double = 0.25) async -> [TopProcessItem] {
+        let startUptime = ProcessInfo.processInfo.systemUptime
+        let first = Self.readProcessCPUTimes()
+        try? await Task.sleep(for: .seconds(sampleWindowSeconds))
+        guard !Task.isCancelled else { return [] }
+        let endUptime = ProcessInfo.processInfo.systemUptime
+        let elapsedSeconds = endUptime - startUptime
+        guard elapsedSeconds > 0.05 else { return [] }
+        let second = Self.readProcessCPUTimes()
+
+        var timebase = mach_timebase_info_data_t()
+        mach_timebase_info(&timebase)
+        let numer = Double(timebase.numer == 0 ? 1 : timebase.numer)
+        let denom = Double(timebase.denom == 0 ? 1 : timebase.denom)
+        let elapsedNs = elapsedSeconds * 1_000_000_000
+
+        var results: [TopProcessItem] = []
+        results.reserveCapacity(second.count)
+        for (pid, after) in second {
+            guard let before = first[pid], after.cpuTicks >= before.cpuTicks else { continue }
+            let deltaTicks = after.cpuTicks - before.cpuTicks
+            guard deltaTicks > 0 else { continue }
+            let cpuNs = Double(deltaTicks) * numer / denom
+            let cpuPct = (cpuNs / elapsedNs) * 100
+            guard cpuPct >= 0.1 else { continue }
+            let name = Self.processName(for: pid)
+            results.append(
+                TopProcessItem(
+                    pid: pid,
+                    name: name,
+                    cpuPercent: cpuPct,
+                    memoryBytes: after.memoryBytes
+                )
+            )
+        }
+
+        results.sort { $0.cpuPercent > $1.cpuPercent }
+        return Array(results.prefix(max(1, limit)))
     }
 
     // MARK: - Native Readers
@@ -196,10 +286,14 @@ actor SystemUsageSampler {
         return CPUTicks(user: user, nice: nice, system: system, idle: idle)
     }
 
-    static func readLoadAverage1m() -> Double? {
+    static func readLoadAverages() -> (Double, Double, Double)? {
         var loads = [Double](repeating: 0, count: 3)
-        guard getloadavg(&loads, 3) > 0 else { return nil }
-        return loads[0]
+        guard getloadavg(&loads, 3) == 3 else { return nil }
+        return (loads[0], loads[1], loads[2])
+    }
+
+    static func readLoadAverage1m() -> Double? {
+        readLoadAverages()?.0
     }
 
     static func readMemoryUsage() -> MemoryUsage {
@@ -270,6 +364,16 @@ actor SystemUsageSampler {
     }
 
     static func readNetworkCounters(uptime: TimeInterval) -> NetworkCounterSnapshot? {
+        let localIPs = readLocalIPv4Addresses()
+        if let counters64 = readNetworkCounters64() {
+            return NetworkCounterSnapshot(
+                interfaces: counters64,
+                uptime: uptime,
+                localIPs: localIPs
+            )
+        }
+
+        // Fallback to getifaddrs if NET_RT_IFLIST2 is unavailable.
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
         defer { freeifaddrs(first) }
@@ -291,8 +395,6 @@ actor SystemUsageSampler {
             }
 
             let name = String(cString: iface.ifa_name)
-            // Track physical Ethernet/Wi-Fi interfaces (`en*`) to avoid double-counting
-            // VPN tunnels (`utun*`) that ride on top of them.
             guard name.hasPrefix("en") else { continue }
 
             let data = dataPtr.assumingMemoryBound(to: if_data.self).pointee
@@ -302,7 +404,192 @@ actor SystemUsageSampler {
             )
         }
 
-        return NetworkCounterSnapshot(interfaces: interfaces, uptime: uptime)
+        return NetworkCounterSnapshot(
+            interfaces: interfaces,
+            uptime: uptime,
+            localIPs: localIPs
+        )
+    }
+
+    /// Reads 64-bit interface byte counters (`if_data64`) via `NET_RT_IFLIST2`,
+    /// avoiding the 32-bit 4 GiB wraparound of `getifaddrs` (`if_data`).
+    private static func readNetworkCounters64() -> [String: InterfaceByteCounters]? {
+        var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0]
+        var length: Int = 0
+        guard sysctl(&mib, UInt32(mib.count), nil, &length, nil, 0) == 0, length > 0 else {
+            return nil
+        }
+
+        var buffer = [UInt8](repeating: 0, count: length)
+        guard sysctl(&mib, UInt32(mib.count), &buffer, &length, nil, 0) == 0 else {
+            return nil
+        }
+
+        var interfaces: [String: InterfaceByteCounters] = [:]
+        var nameBuf = [CChar](repeating: 0, count: Int(IF_NAMESIZE))
+
+        buffer.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var offset = 0
+            let headerSize = MemoryLayout<if_msghdr>.size
+            let header2Size = MemoryLayout<if_msghdr2>.size
+
+            while offset + headerSize <= length {
+                let ifm = base.loadUnaligned(fromByteOffset: offset, as: if_msghdr.self)
+                let msgLen = Int(ifm.ifm_msglen)
+                guard msgLen > 0, offset + msgLen <= length else { break }
+
+                if Int32(ifm.ifm_type) == RTM_IFINFO2, msgLen >= header2Size {
+                    let ifm2 = base.loadUnaligned(fromByteOffset: offset, as: if_msghdr2.self)
+                    let flags = ifm2.ifm_flags
+                    let isActive = (flags & IFF_UP) != 0
+                        && (flags & IFF_RUNNING) != 0
+                        && (flags & IFF_LOOPBACK) == 0
+                    if isActive,
+                       if_indextoname(UInt32(ifm2.ifm_index), &nameBuf) != nil {
+                        let name = String(cString: nameBuf)
+                        // Track physical Ethernet/Wi-Fi interfaces (`en*`) to avoid
+                        // double-counting VPN tunnels (`utun*`) riding on top of them.
+                        if name.hasPrefix("en") {
+                            interfaces[name] = InterfaceByteCounters(
+                                inBytes: ifm2.ifm_data.ifi_ibytes,
+                                outBytes: ifm2.ifm_data.ifi_obytes
+                            )
+                        }
+                    }
+                }
+
+                offset += msgLen
+            }
+        }
+
+        return interfaces
+    }
+
+    private static func readLocalIPv4Addresses() -> [String: String] {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return [:] }
+        defer { freeifaddrs(first) }
+
+        var addresses: [String: String] = [:]
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        var ipBuf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+
+        while let ptr = cursor {
+            let iface = ptr.pointee
+            cursor = iface.ifa_next
+
+            let flags = Int32(iface.ifa_flags)
+            guard (flags & IFF_UP) != 0,
+                  (flags & IFF_RUNNING) != 0,
+                  (flags & IFF_LOOPBACK) == 0,
+                  let addr = iface.ifa_addr,
+                  addr.pointee.sa_family == UInt8(AF_INET) else {
+                continue
+            }
+
+            let name = String(cString: iface.ifa_name)
+            guard name.hasPrefix("en"), addresses[name] == nil else { continue }
+
+            var sinAddr = addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
+            if inet_ntop(AF_INET, &sinAddr, &ipBuf, socklen_t(INET_ADDRSTRLEN)) != nil {
+                addresses[name] = String(cString: ipBuf)
+            }
+        }
+
+        return addresses
+    }
+
+    // MARK: - On-Demand Top Process Readers
+
+    private struct ProcessSample {
+        let cpuTicks: UInt64
+        let memoryBytes: UInt64
+    }
+
+    private static func listAllPIDs() -> [pid_t] {
+        let byteCount = proc_listallpids(nil, 0)
+        guard byteCount > 0 else { return [] }
+        let capacity = Int(byteCount) / MemoryLayout<pid_t>.stride + 32
+        var pids = [pid_t](repeating: 0, count: capacity)
+        let actualBytes = proc_listallpids(&pids, Int32(capacity * MemoryLayout<pid_t>.stride))
+        guard actualBytes > 0 else { return [] }
+        let count = min(Int(actualBytes) / MemoryLayout<pid_t>.stride, pids.count)
+        return pids[0..<count].filter { $0 > 0 }
+    }
+
+    private static func readProcessMemoryBytes(pid: pid_t, fallbackRSS: UInt64) -> UInt64 {
+        var rusage = rusage_info_v4()
+        let ok = withUnsafeMutablePointer(to: &rusage) { ptr in
+            ptr.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { rusagePtr in
+                proc_pid_rusage(pid, RUSAGE_INFO_V4, rusagePtr) == 0
+            }
+        }
+        if ok, rusage.ri_phys_footprint > 0 {
+            return rusage.ri_phys_footprint
+        }
+        return fallbackRSS
+    }
+
+    private static func readProcessCPUTimes() -> [pid_t: ProcessSample] {
+        let pids = listAllPIDs()
+        var samples: [pid_t: ProcessSample] = [:]
+        samples.reserveCapacity(pids.count)
+
+        let expectedSize = Int32(MemoryLayout<proc_taskinfo>.size)
+        for pid in pids {
+            var info = proc_taskinfo()
+            let size = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, expectedSize)
+            guard size == expectedSize else { continue }
+            let ticks = info.pti_total_user &+ info.pti_total_system
+            samples[pid] = ProcessSample(cpuTicks: ticks, memoryBytes: info.pti_resident_size)
+        }
+        return samples
+    }
+
+    static func readTopMemoryProcesses(limit: Int = 3) -> [TopProcessItem] {
+        let pids = listAllPIDs()
+        let expectedSize = Int32(MemoryLayout<proc_taskinfo>.size)
+        var candidates: [(pid: pid_t, bytes: UInt64)] = []
+        candidates.reserveCapacity(pids.count)
+
+        for pid in pids {
+            var info = proc_taskinfo()
+            let size = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &info, expectedSize)
+            let rss = size == expectedSize ? info.pti_resident_size : 0
+            let footprint = readProcessMemoryBytes(pid: pid, fallbackRSS: rss)
+            guard footprint > 0 else { continue }
+            candidates.append((pid, footprint))
+        }
+
+        candidates.sort { $0.bytes > $1.bytes }
+        return candidates.prefix(max(1, limit)).map { entry in
+            TopProcessItem(
+                pid: entry.pid,
+                name: processName(for: entry.pid),
+                cpuPercent: 0,
+                memoryBytes: entry.bytes
+            )
+        }
+    }
+
+    private static func processName(for pid: pid_t) -> String {
+        var pathBuf = [CChar](repeating: 0, count: 4096)
+        if proc_pidpath(pid, &pathBuf, UInt32(pathBuf.count)) > 0 {
+            let path = String(cString: pathBuf)
+            let last = URL(fileURLWithPath: path).lastPathComponent
+            if !last.isEmpty {
+                return last
+            }
+        }
+        var nameBuf = [CChar](repeating: 0, count: 256)
+        if proc_name(pid, &nameBuf, UInt32(nameBuf.count)) > 0 {
+            let name = String(cString: nameBuf)
+            if !name.isEmpty {
+                return name
+            }
+        }
+        return "PID \(pid)"
     }
 
     static func readDiskUsage() -> DiskUsage? {

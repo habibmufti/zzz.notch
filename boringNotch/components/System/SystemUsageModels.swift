@@ -78,9 +78,43 @@ struct CPUUsage: Equatable, Sendable {
     let userPercent: Double
     let systemPercent: Double
     let loadAverage1m: Double?
+    let loadAverage5m: Double?
+    let loadAverage15m: Double?
+    let coreCount: Int
+
+    init(
+        userPercent: Double,
+        systemPercent: Double,
+        loadAverage1m: Double?,
+        loadAverage5m: Double? = nil,
+        loadAverage15m: Double? = nil,
+        coreCount: Int = ProcessInfo.processInfo.processorCount
+    ) {
+        self.userPercent = userPercent
+        self.systemPercent = systemPercent
+        self.loadAverage1m = loadAverage1m
+        self.loadAverage5m = loadAverage5m
+        self.loadAverage15m = loadAverage15m
+        self.coreCount = coreCount
+    }
 
     var totalPercent: Double {
         min(max(userPercent + systemPercent, 0), 100)
+    }
+
+    var displayUserPercent: Int {
+        Int(min(max(userPercent, 0), 100).rounded())
+    }
+
+    var displaySystemPercent: Int {
+        let remaining = max(0, 100 - displayUserPercent)
+        return min(Int(min(max(systemPercent, 0), 100).rounded()), remaining)
+    }
+
+    /// Integer total guaranteed to equal `displayUserPercent + displaySystemPercent`
+    /// so header and breakdown never disagree due to independent rounding.
+    var displayTotalPercent: Int {
+        min(displayUserPercent + displaySystemPercent, 100)
     }
 
     var userFraction: Double {
@@ -104,8 +138,30 @@ struct MemoryUsage: Equatable, Sendable {
     let pressure: MemoryPressureLevel
 
     var usedFraction: Double {
+        fraction(of: usedBytes)
+    }
+
+    var appFraction: Double {
+        fraction(of: appBytes)
+    }
+
+    var wiredFraction: Double {
+        min(fraction(of: wiredBytes), max(0, 1 - appFraction))
+    }
+
+    var compressedFraction: Double {
+        min(fraction(of: compressedBytes), max(0, 1 - appFraction - wiredFraction))
+    }
+
+    /// Flags heavy swap even when macOS still reports `Normal` memory pressure.
+    var isSwapElevated: Bool {
+        swapUsedBytes >= 4 * 1_073_741_824
+            || (totalBytes > 0 && Double(swapUsedBytes) / Double(totalBytes) >= 0.25)
+    }
+
+    private func fraction(of bytes: UInt64) -> Double {
         guard totalBytes > 0 else { return 0 }
-        return min(max(Double(usedBytes) / Double(totalBytes), 0), 1)
+        return min(max(Double(bytes) / Double(totalBytes), 0), 1)
     }
 
     static let zero = MemoryUsage(
@@ -123,6 +179,19 @@ struct NetworkUsage: Equatable, Sendable {
     let downloadBytesPerSecond: Double
     let uploadBytesPerSecond: Double
     let activeInterface: String?
+    let localIP: String?
+
+    init(
+        downloadBytesPerSecond: Double,
+        uploadBytesPerSecond: Double,
+        activeInterface: String?,
+        localIP: String? = nil
+    ) {
+        self.downloadBytesPerSecond = downloadBytesPerSecond
+        self.uploadBytesPerSecond = uploadBytesPerSecond
+        self.activeInterface = activeInterface
+        self.localIP = localIP
+    }
 
     var peakRate: Double {
         max(downloadBytesPerSecond, uploadBytesPerSecond)
@@ -131,8 +200,28 @@ struct NetworkUsage: Equatable, Sendable {
     static let zero = NetworkUsage(
         downloadBytesPerSecond: 0,
         uploadBytesPerSecond: 0,
-        activeInterface: nil
+        activeInterface: nil,
+        localIP: nil
     )
+}
+
+struct NetworkSamplePoint: Equatable, Sendable {
+    let downloadBytesPerSecond: Double
+    let uploadBytesPerSecond: Double
+}
+
+enum SystemProcessKind: Equatable, Sendable {
+    case cpu
+    case memory
+}
+
+struct TopProcessItem: Identifiable, Equatable, Sendable {
+    let pid: pid_t
+    let name: String
+    let cpuPercent: Double
+    let memoryBytes: UInt64
+
+    var id: pid_t { pid }
 }
 
 struct DiskUsage: Equatable, Sendable {
@@ -141,6 +230,10 @@ struct DiskUsage: Equatable, Sendable {
 
     var availableGB: Double {
         Double(availableBytes) / 1_000_000_000
+    }
+
+    var usedBytes: UInt64 {
+        totalBytes >= availableBytes ? totalBytes - availableBytes : 0
     }
 }
 
@@ -153,6 +246,9 @@ struct BatteryUsage: Equatable, Sendable {
     var symbolName: String {
         if isCharging {
             return "battery.100percent.bolt"
+        }
+        if isPluggedIn {
+            return "powerplug.fill"
         }
         switch percentage {
         case 88...: return "battery.100percent"

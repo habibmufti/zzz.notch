@@ -139,6 +139,7 @@ struct NotificationLiveActivity: View {
 }
 
 struct NotificationExpandedView: View {
+    @EnvironmentObject private var vm: BoringViewModel
     @ObservedObject private var manager = SystemNotificationManager.shared
     @ObservedObject private var askCenter = DevAskCenter.shared
     let notification: SystemNotification
@@ -221,7 +222,7 @@ struct NotificationExpandedView: View {
                 }
 
                 Button {
-                    manager.dismissActive(token: notification.id)
+                    manager.dismissActive(token: notification.id, dismissNative: true)
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 9, weight: .semibold))
@@ -240,6 +241,7 @@ struct NotificationExpandedView: View {
         Task {
             guard await manager.open(notification) else { return }
             manager.dismissActive(token: notification.id)
+            vm.close()
         }
     }
 }

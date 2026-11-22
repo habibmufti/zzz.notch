@@ -44,6 +44,19 @@ private extension AXUIElement {
         AXValueGetValue(value as! AXValue, .cgPoint, &point)
         return point
     }
+
+    func actionNames() -> [String] {
+        var names: CFArray?
+        guard AXUIElementCopyActionNames(self, &names) == .success,
+              let list = names as? [String]
+        else { return [] }
+        return list
+    }
+
+    @discardableResult
+    func performAction(_ action: String) -> Bool {
+        AXUIElementPerformAction(self, action as CFString) == .success
+    }
 }
 
 struct CapturedNotification {
@@ -70,6 +83,7 @@ final class NotificationWatcher {
     private var settleWorkItem: DispatchWorkItem?
     private var observedWindows: [CFHashCode: AXUIElement] = [:]
     private var liveTokens = Set<String>()
+    private var liveBanners: [String: AXUIElement] = [:]
     private var allowedBundleIDs = Set<String>()
     private var mirrorAllApps = false
     private var parkedWindowByToken: [String: Int] = [:]
@@ -121,8 +135,29 @@ final class NotificationWatcher {
         observerContext = nil
         scanScheduled = false
         liveTokens.removeAll()
+        liveBanners.removeAll()
         restoreAllWindows()
         appElement = nil
+    }
+
+    /// Triggers the native macOS Notification Center click action on a live
+    /// banner so the target app receives its full notification payload (e.g.
+    /// opening the exact WhatsApp chat, Slack channel, or Mail message).
+    func activateBanner(token: String) -> Bool {
+        guard let banner = resolveLiveBanner(for: token) else { return false }
+        guard performActivateAction(on: banner) else { return false }
+        liveBanners.removeValue(forKey: token)
+        scheduleSettleScan()
+        return true
+    }
+
+    /// Dismisses a live macOS Notification Center banner when the user
+    /// explicitly clicks the notch close button.
+    func dismissBanner(token: String) {
+        guard let banner = resolveLiveBanner(for: token) else { return }
+        _ = performDismissAction(on: banner)
+        liveBanners.removeValue(forKey: token)
+        scheduleSettleScan()
     }
 
     private func addObserverNotifications(to element: AXUIElement) -> Bool {
@@ -268,7 +303,10 @@ final class NotificationWatcher {
                 for banner in banners {
                     let token = token(for: banner)
                     seen.insert(token)
-                    guard !liveTokens.contains(token) else { continue }
+                    if liveTokens.contains(token) {
+                        liveBanners[token] = banner
+                        continue
+                    }
 
                     let notification = capture(banner, token: token)
                     guard mirrorAllApps || isAllowed(notification) else { continue }
@@ -278,14 +316,96 @@ final class NotificationWatcher {
                     }
 
                     liveTokens.insert(token)
+                    liveBanners[token] = banner
                     onBanner?(notification)
                 }
             }
 
             let removed = liveTokens.subtracting(seen)
             liveTokens.formIntersection(seen)
-            removed.forEach(restoreWindowIfUnused)
+            for token in removed {
+                liveBanners.removeValue(forKey: token)
+                restoreWindowIfUnused(token)
+            }
         }
+    }
+
+    private func resolveLiveBanner(for targetToken: String) -> AXUIElement? {
+        if let cached = liveBanners[targetToken],
+           !cached.actionNames().isEmpty || cached.string(kAXSubroleAttribute) != nil {
+            return cached
+        }
+        guard let appElement else { return nil }
+        for window in (appElement[kAXWindowsAttribute] as? [AXUIElement]) ?? [] {
+            guard case .banners(let banners) = inspect(window) else { continue }
+            for banner in banners where token(for: banner) == targetToken {
+                liveBanners[targetToken] = banner
+                return banner
+            }
+        }
+        return nil
+    }
+
+    private func performActivateAction(on banner: AXUIElement) -> Bool {
+        if let action = NotificationActionSelection.activateAction(from: banner.actionNames()),
+           banner.performAction(action) {
+            return true
+        }
+
+        // Some macOS versions attach AXPress to a primary button/group child
+        // rather than the outer banner container.
+        var pending = banner.children()
+        var visited: Set<CFHashCode> = [CFHash(banner)]
+        let maxSearchNodes = 64
+
+        while !pending.isEmpty && visited.count < maxSearchNodes {
+            let element = pending.removeFirst()
+            guard visited.insert(CFHash(element)).inserted else { continue }
+
+            let subrole = element.string(kAXSubroleAttribute)
+            let identifier = element.string(kAXIdentifierAttribute)
+            if NotificationActionSelection.isCloseOrOptionsControl(subrole: subrole, identifier: identifier) {
+                continue
+            }
+
+            if let action = NotificationActionSelection.activateAction(from: element.actionNames()),
+               element.performAction(action) {
+                return true
+            }
+            pending.append(contentsOf: element.children())
+        }
+
+        return banner.performAction(kAXPressAction)
+    }
+
+    private func performDismissAction(on banner: AXUIElement) -> Bool {
+        if let action = NotificationActionSelection.dismissAction(from: banner.actionNames()),
+           banner.performAction(action) {
+            return true
+        }
+
+        var pending = banner.children()
+        var visited: Set<CFHashCode> = [CFHash(banner)]
+        let maxSearchNodes = 64
+
+        while !pending.isEmpty && visited.count < maxSearchNodes {
+            let element = pending.removeFirst()
+            guard visited.insert(CFHash(element)).inserted else { continue }
+
+            let subrole = element.string(kAXSubroleAttribute)
+            let identifier = element.string(kAXIdentifierAttribute)?.lowercased() ?? ""
+            let isDismissControl = subrole == "AXCloseButton"
+                || identifier.contains("close")
+                || identifier.contains("clear")
+                || identifier.contains("dismiss")
+
+            if isDismissControl, element.performAction(kAXPressAction) {
+                return true
+            }
+            pending.append(contentsOf: element.children())
+        }
+
+        return false
     }
 
     private enum WindowContents {

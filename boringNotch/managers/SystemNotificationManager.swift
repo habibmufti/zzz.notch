@@ -99,11 +99,15 @@ final class SystemNotificationManager: ObservableObject {
         }
     }
 
-    func dismissActive(token: String? = nil) {
+    func dismissActive(token: String? = nil, dismissNative: Bool = false) {
         guard token == nil || activeNotification?.id == token else { return }
+        let dismissed = activeNotification
         dismissTask?.cancel()
         dismissTask = nil
         activeNotification = nil
+        if dismissNative, let dismissed, dismissed.status == nil {
+            XPCHelperClient.shared.dismissNotification(token: dismissed.id)
+        }
         if isUserPresent {
             promoteNext()
         } else {
@@ -130,6 +134,14 @@ final class SystemNotificationManager: ObservableObject {
             return workspace.open(actionURL)
         }
 
+        // For mirrored macOS notifications, trigger the native banner's AX
+        // click action first so NotificationCenter delivers the app's full
+        // UNNotificationResponse (deep-linking into the exact chat/email/thread).
+        if notification.status == nil,
+           await XPCHelperClient.shared.activateNotification(token: notification.id) {
+            return true
+        }
+
         for bundleID in candidateBundleIDs(for: notification) {
             let running = workspace.runningApplications.first { application in
                 guard !application.isTerminated,
@@ -137,18 +149,16 @@ final class SystemNotificationManager: ObservableObject {
                 return normalizeBundleIdentifier(applicationBundleID) == bundleID
             }
 
-            if let running {
-                if running.activate(options: [.activateAllWindows]) {
-                    return true
-                }
-                if let appURL = running.bundleURL,
-                   await launchApplication(at: appURL) {
-                    return true
-                }
+            // Prefer NSWorkspace.openApplication over NSRunningApplication.activate:
+            // on macOS 14+ it bypasses cooperative-activation restrictions from
+            // accessory panels and triggers applicationShouldHandleReopen when
+            // windows were closed or minimized.
+            if let appURL = running?.bundleURL ?? workspace.urlForApplication(withBundleIdentifier: bundleID),
+               await launchApplication(at: appURL) {
+                return true
             }
 
-            if let appURL = workspace.urlForApplication(withBundleIdentifier: bundleID),
-               await launchApplication(at: appURL) {
+            if let running, running.activate(options: [.activateAllWindows]) {
                 return true
             }
         }

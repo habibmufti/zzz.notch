@@ -451,6 +451,31 @@ extension XPCHelperClient {
             }
         }
     }
+
+    nonisolated func activateNotification(token: String) async -> Bool {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            return try await service.withContinuation { service, continuation in
+                service.activateNotification(token) { activated in
+                    continuation.resume(returning: activated)
+                }
+            }
+        } catch {
+            await MainActor.run { self.lastError = .transport(underlying: error) }
+            return false
+        }
+    }
+
+    nonisolated func dismissNotification(token: String) {
+        Task {
+            let service = await MainActor.run { ensureRemoteService() }
+            do {
+                try await service.withService { $0.dismissNotification(token) }
+            } catch {
+                await MainActor.run { self.lastError = .transport(underlying: error) }
+            }
+        }
+    }
 }
 
 extension Notification.Name {

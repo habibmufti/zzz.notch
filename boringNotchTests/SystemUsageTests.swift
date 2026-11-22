@@ -136,4 +136,77 @@ final class SystemUsageTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(second.cpu.totalPercent, 0)
         XCTAssertLessThanOrEqual(second.cpu.totalPercent, 100)
     }
+
+    func testCPUDisplayPercentagesStayConsistentWhenRounding() {
+        // Previously 7.6 + 3.6 = 11.2 rounded to 11% while showing U 8% · S 4%.
+        let cpu = CPUUsage(userPercent: 7.6, systemPercent: 3.6, loadAverage1m: 2.4)
+        XCTAssertEqual(cpu.displayUserPercent, 8)
+        XCTAssertEqual(cpu.displaySystemPercent, 4)
+        XCTAssertEqual(cpu.displayTotalPercent, cpu.displayUserPercent + cpu.displaySystemPercent)
+    }
+
+    func testMemoryStackedFractionsAndElevatedSwapDetection() {
+        let gib: UInt64 = 1_073_741_824
+        let memory = MemoryUsage(
+            usedBytes: 12 * gib,
+            totalBytes: 16 * gib,
+            appBytes: 5 * gib,
+            wiredBytes: 3 * gib,
+            compressedBytes: 4 * gib,
+            swapUsedBytes: 8 * gib,
+            pressure: .normal
+        )
+
+        XCTAssertEqual(memory.appFraction, 5.0 / 16.0, accuracy: 0.001)
+        XCTAssertEqual(memory.wiredFraction, 3.0 / 16.0, accuracy: 0.001)
+        XCTAssertEqual(memory.compressedFraction, 4.0 / 16.0, accuracy: 0.001)
+        XCTAssertTrue(memory.isSwapElevated)
+
+        let lowSwap = MemoryUsage(
+            usedBytes: 8 * gib,
+            totalBytes: 16 * gib,
+            appBytes: 5 * gib,
+            wiredBytes: 2 * gib,
+            compressedBytes: 1 * gib,
+            swapUsedBytes: 512 * 1_048_576,
+            pressure: .normal
+        )
+        XCTAssertFalse(lowSwap.isSwapElevated)
+    }
+
+    func testNetworkDeltaSupports64BitCountersAndLocalIP() {
+        let prev = NetworkCounterSnapshot(
+            interfaces: ["en0": InterfaceByteCounters(inBytes: 5_000_000_000, outBytes: 1_000_000_000)],
+            uptime: 100.0,
+            localIPs: ["en0": "192.168.1.42"]
+        )
+        let curr = NetworkCounterSnapshot(
+            interfaces: ["en0": InterfaceByteCounters(inBytes: 5_002_000_000, outBytes: 1_000_500_000)],
+            uptime: 102.0,
+            localIPs: ["en0": "192.168.1.42"]
+        )
+        let usage = NetworkCounterSnapshot.deltaUsage(from: prev, to: curr)
+        XCTAssertEqual(usage.downloadBytesPerSecond, 1_000_000, accuracy: 0.1)
+        XCTAssertEqual(usage.uploadBytesPerSecond, 250_000, accuracy: 0.1)
+        XCTAssertEqual(usage.localIP, "192.168.1.42")
+    }
+
+    func testBatterySymbolDistinguishesPluggedInNotCharging() {
+        let pluggedHolding = BatteryUsage(percentage: 80, isCharging: false, isPluggedIn: true, minutesRemaining: nil)
+        XCTAssertEqual(pluggedHolding.symbolName, "powerplug.fill")
+
+        let charging = BatteryUsage(percentage: 80, isCharging: true, isPluggedIn: true, minutesRemaining: 30)
+        XCTAssertEqual(charging.symbolName, "battery.100percent.bolt")
+
+        let discharging = BatteryUsage(percentage: 53, isCharging: false, isPluggedIn: false, minutesRemaining: 252)
+        XCTAssertEqual(discharging.symbolName, "battery.50percent")
+    }
+
+    func testOnDemandTopMemoryProcessesReturnsNonEmptyResults() async {
+        let sampler = SystemUsageSampler()
+        let top = await sampler.sampleTopMemoryProcesses(limit: 3)
+        XCTAssertFalse(top.isEmpty)
+        XCTAssertLessThanOrEqual(top.count, 3)
+        XCTAssertTrue(top.allSatisfy { !$0.name.isEmpty && $0.memoryBytes > 0 })
+    }
 }
