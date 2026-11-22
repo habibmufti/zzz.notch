@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="https://github.com/habibmufti/zzz.notch/actions/workflows/cicd.yml">
-    <img src="https://github.com/habibmufti/zzz.notch/actions/workflows/cicd.yml/badge.svg?branch=zzz" alt="Build for macOS">
+    <img src="https://github.com/habibmufti/zzz.notch/actions/workflows/cicd.yml/badge.svg?branch=main" alt="Build for macOS">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-GPL--3.0-emerald.svg" alt="GPL-3.0 License">

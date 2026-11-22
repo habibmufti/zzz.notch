@@ -25,7 +25,7 @@ final class CIUpdater: ObservableObject {
     }
 
     static let repo = "habibmufti/zzz.notch"
-    static let branch = "zzz"
+    static let branch = "main"
     static let workflow = "Build for macOS"
 
     @Published private(set) var state: State = .idle
@@ -227,7 +227,7 @@ struct UpdaterSettingsView: View {
         } header: {
             Text("CI Updates")
         } footer: {
-            Text("Downloads the latest GitHub Actions build on branch zzz and re-signs it with your local identity via install.sh so macOS privacy grants persist.")
+            Text("Downloads the latest GitHub Actions build on branch main and re-signs it with your local identity via install.sh so macOS privacy grants persist.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

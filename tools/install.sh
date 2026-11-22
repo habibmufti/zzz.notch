@@ -16,7 +16,7 @@ dest=/Applications/zzz.notch.app
 identity=${ZZZ_SIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk 'NR==1 && $2 ~ /^[0-9A-F]{40}$/ {print $2}')}
 [ -n "$identity" ] || { echo "no code-signing identity; set ZZZ_SIGN_IDENTITY" >&2; exit 1; }
 
-run=${1:-$(gh run list -R "$repo" --branch zzz --workflow "Build for macOS" --status success -L 1 --json databaseId --jq '.[0].databaseId')}
+run=${1:-$(gh run list -R "$repo" --branch main --workflow "Build for macOS" --status success -L 1 --json databaseId --jq '.[0].databaseId')}
 artifact=$(gh api "repos/$repo/actions/runs/$run/artifacts" --jq '.artifacts[] | select(.name | startswith("zzz-notch")) | .name')
 [ -n "$artifact" ] || { echo "run $run has no zzz-notch artifact" >&2; exit 1; }
 
