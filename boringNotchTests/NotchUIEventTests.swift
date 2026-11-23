@@ -220,7 +220,7 @@ final class PlaybackStateTests: XCTestCase {
         )
     }
 
-    func testNotificationHistoryLifecycleAndPersistence() throws {
+    func testNotificationHistoryLifecycleAndPersistence() async throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("zzznotch-history-tests-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -297,7 +297,18 @@ final class PlaybackStateTests: XCTestCase {
         XCTAssertEqual(reloaded.history.first?.id, "cap-59")
         XCTAssertEqual(reloaded.history.last?.id, "cap-10")
 
-        // 6. Clear removes everything and persists empty state.
+        // 6. Clicking a history entry removes it from the list (inbox-zero).
+        let clickTarget = SystemNotification(
+            id: "dev-click", appName: "agy", bundleID: nil,
+            title: "zzz.notch", subtitle: nil, body: "Ready",
+            receivedAt: now.addingTimeInterval(70), status: .ok)
+        reloaded.recordInHistory(clickTarget, now: now.addingTimeInterval(70))
+        let topEntry = try XCTUnwrap(reloaded.history.first)
+        XCTAssertEqual(topEntry.id, "dev-click")
+        _ = await reloaded.openHistoryEntry(topEntry)
+        XCTAssertFalse(reloaded.history.contains(where: { $0.id == "dev-click" }))
+
+        // 7. Clear removes everything and persists empty state.
         reloaded.clearHistory()
         XCTAssertTrue(reloaded.history.isEmpty)
         let afterClear = SystemNotificationManager(storageURL: fileURL, observeSystemNotifications: false)

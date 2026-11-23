@@ -344,8 +344,9 @@ final class SystemNotificationManager: ObservableObject {
     }
 
     func openHistoryEntry(_ entry: NotificationHistoryEntry) async -> Bool {
-        markHistoryRead(id: entry.id)
-        return await open(entry.asNotification)
+        let opened = await open(entry.asNotification)
+        removeFromHistory(id: entry.id)
+        return opened
     }
 
     private func pruneExpiredHistory(now: Date, persist: Bool) {

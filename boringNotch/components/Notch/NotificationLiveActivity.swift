@@ -264,9 +264,8 @@ struct NotificationExpandedView: View {
 
     private func openSourceApp() {
         Task {
-            manager.markHistoryRead(id: notification.id)
             guard await manager.open(notification) else { return }
-            manager.dismissActive(token: notification.id)
+            manager.dismissActive(token: notification.id, removeFromHistory: true)
             vm.close()
         }
     }
@@ -288,8 +287,6 @@ struct NotificationHistoryView: View {
     /// High-water mark while open so deleting an item does not shrink the notch
     /// out from under the cursor and close it.
     @State private var minOpenHeight: CGFloat = 0
-    /// Preserves the unread dot during the visit that marks items as read.
-    @State private var sessionUnreadIDs: Set<String> = []
 
     private var maxScrollHeight: CGFloat { max(140, devTabNotchHeight - 58) }
 
@@ -305,7 +302,7 @@ struct NotificationHistoryView: View {
                         ForEach(manager.history) { entry in
                             NotificationHistoryRow(
                                 entry: entry,
-                                showUnreadDot: !entry.isRead || sessionUnreadIDs.contains(entry.id),
+                                showUnreadDot: !entry.isRead,
                                 onOpen: { openEntry(entry) },
                                 onRemove: {
                                     withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
@@ -340,8 +337,6 @@ struct NotificationHistoryView: View {
         .frame(maxWidth: .infinity, alignment: .top)
         .onAppear {
             manager.pruneExpiredHistory()
-            sessionUnreadIDs = Set(manager.history.filter { !$0.isRead }.map(\.id))
-            manager.markAllHistoryRead()
         }
     }
 
@@ -358,7 +353,6 @@ struct NotificationHistoryView: View {
                 Button {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                         manager.clearHistory()
-                        sessionUnreadIDs.removeAll()
                     }
                 } label: {
                     Text("Clear all")
@@ -394,9 +388,10 @@ struct NotificationHistoryView: View {
 
     private func openEntry(_ entry: NotificationHistoryEntry) {
         Task {
-            sessionUnreadIDs.remove(entry.id)
-            guard await manager.openHistoryEntry(entry) else { return }
-            vm.close()
+            let opened = await manager.openHistoryEntry(entry)
+            if opened {
+                vm.close()
+            }
         }
     }
 }
