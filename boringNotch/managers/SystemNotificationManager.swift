@@ -40,25 +40,91 @@ struct SystemNotification: Identifiable, Equatable {
     var tmuxPane: String? = nil
 }
 
+struct NotificationHistoryEntry: Identifiable, Equatable, Codable {
+    let id: String
+    let appName: String?
+    let bundleID: String?
+    let title: String?
+    let subtitle: String?
+    let body: String?
+    var receivedAt: Date
+    var symbol: String?
+    var status: DevEventStatus?
+    var actionURL: URL?
+    var tmuxPane: String?
+    var isRead: Bool
+
+    init(from notification: SystemNotification, isRead: Bool = false) {
+        self.id = notification.id
+        self.appName = notification.appName
+        self.bundleID = notification.bundleID
+        self.title = notification.title
+        self.subtitle = notification.subtitle
+        self.body = notification.body
+        self.receivedAt = notification.receivedAt
+        self.symbol = notification.symbol
+        self.status = notification.status
+        self.actionURL = notification.actionURL
+        self.tmuxPane = notification.tmuxPane
+        self.isRead = isRead
+    }
+
+    var asNotification: SystemNotification {
+        SystemNotification(
+            id: id,
+            appName: appName,
+            bundleID: bundleID,
+            title: title,
+            subtitle: subtitle,
+            body: body,
+            receivedAt: receivedAt,
+            symbol: symbol,
+            status: status,
+            actionURL: actionURL,
+            tmuxPane: tmuxPane
+        )
+    }
+}
+
 @MainActor
 final class SystemNotificationManager: ObservableObject {
     static let shared = SystemNotificationManager()
 
+    static let historyLimit = 50
+    static let historyRetention: TimeInterval = 24 * 60 * 60
+
     @Published private(set) var activeNotification: SystemNotification?
     @Published private(set) var queuedNotifications: [SystemNotification] = []
+    @Published private(set) var history: [NotificationHistoryEntry] = []
+
+    var unreadCount: Int {
+        history.reduce(0) { $0 + ($1.isRead ? 0 : 1) }
+    }
 
     private let queueLimit = 5
     private let displayDuration: TimeInterval = 8
+    private let historyStorageURL: URL?
     private var dismissTask: Task<Void, Never>?
     private var notificationObserver: NSObjectProtocol?
     private var isUserPresent = false
 
-    private init() {
-        notificationObserver = NotificationCenter.default.addObserver(
-            forName: .systemNotificationDidAppear, object: nil, queue: .main
-        ) { [weak self] note in
-            guard let payload = note.userInfo as? [String: String] else { return }
-            Task { @MainActor in self?.add(payload) }
+    static var defaultHistoryStorageURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent(bundleIdentifier, isDirectory: true)
+            .appendingPathComponent("notification-history.json")
+    }
+
+    init(storageURL: URL? = SystemNotificationManager.defaultHistoryStorageURL, observeSystemNotifications: Bool = true) {
+        self.historyStorageURL = storageURL
+        loadHistory()
+        if observeSystemNotifications {
+            notificationObserver = NotificationCenter.default.addObserver(
+                forName: .systemNotificationDidAppear, object: nil, queue: .main
+            ) { [weak self] note in
+                guard let payload = note.userInfo as? [String: String] else { return }
+                Task { @MainActor in self?.add(payload) }
+            }
         }
     }
 
@@ -99,14 +165,23 @@ final class SystemNotificationManager: ObservableObject {
         }
     }
 
-    func dismissActive(token: String? = nil, dismissNative: Bool = false) {
+    func dismissActive(
+        token: String? = nil,
+        dismissNative: Bool = false,
+        removeFromHistory: Bool = false
+    ) {
         guard token == nil || activeNotification?.id == token else { return }
         let dismissed = activeNotification
         dismissTask?.cancel()
         dismissTask = nil
         activeNotification = nil
-        if dismissNative, let dismissed, dismissed.status == nil {
-            XPCHelperClient.shared.dismissNotification(token: dismissed.id)
+        if let dismissed {
+            if dismissNative && dismissed.status == nil {
+                XPCHelperClient.shared.dismissNotification(token: dismissed.id)
+            }
+            if removeFromHistory {
+                self.removeFromHistory(id: dismissed.id)
+            }
         }
         if isUserPresent {
             promoteNext()
@@ -193,6 +268,7 @@ final class SystemNotificationManager: ObservableObject {
             receivedAt: Date()
         )
         guard isAllowed(notification) else { return }
+        recordInHistory(notification)
         enqueue(notification)
     }
 
@@ -200,6 +276,9 @@ final class SystemNotificationManager: ObservableObject {
     /// filter; an event reusing a live id replaces that one in place, so a
     /// tool can update a status ("running" → "done") without stacking.
     func post(_ notification: SystemNotification) {
+        if notification.status != .run && notification.status != .idle {
+            recordInHistory(notification)
+        }
         if activeNotification?.id == notification.id {
             if isUserPresent {
                 activeNotification = notification
@@ -213,6 +292,97 @@ final class SystemNotificationManager: ObservableObject {
             return
         }
         enqueue(notification)
+    }
+
+    // MARK: - Notification History
+
+    func recordInHistory(_ notification: SystemNotification, now: Date = Date()) {
+        pruneExpiredHistory(now: now, persist: false)
+        history.removeAll { $0.id == notification.id }
+        history.insert(NotificationHistoryEntry(from: notification, isRead: false), at: 0)
+        if history.count > Self.historyLimit {
+            history.removeLast(history.count - Self.historyLimit)
+        }
+        saveHistory()
+    }
+
+    func markAllHistoryRead() {
+        var changed = false
+        for index in history.indices where !history[index].isRead {
+            history[index].isRead = true
+            changed = true
+        }
+        if changed {
+            saveHistory()
+        }
+    }
+
+    func markHistoryRead(id: String) {
+        guard let index = history.firstIndex(where: { $0.id == id }), !history[index].isRead else {
+            return
+        }
+        history[index].isRead = true
+        saveHistory()
+    }
+
+    func removeFromHistory(id: String) {
+        let before = history.count
+        history.removeAll { $0.id == id }
+        if history.count != before {
+            saveHistory()
+        }
+    }
+
+    func clearHistory() {
+        guard !history.isEmpty else { return }
+        history.removeAll()
+        saveHistory()
+    }
+
+    func pruneExpiredHistory(now: Date = Date()) {
+        pruneExpiredHistory(now: now, persist: true)
+    }
+
+    func openHistoryEntry(_ entry: NotificationHistoryEntry) async -> Bool {
+        markHistoryRead(id: entry.id)
+        return await open(entry.asNotification)
+    }
+
+    private func pruneExpiredHistory(now: Date, persist: Bool) {
+        let cutoff = now.addingTimeInterval(-Self.historyRetention)
+        let before = history.count
+        history.removeAll { $0.receivedAt < cutoff }
+        if persist && history.count != before {
+            saveHistory()
+        }
+    }
+
+    private func loadHistory(now: Date = Date()) {
+        guard let url = historyStorageURL,
+              let data = try? Data(contentsOf: url) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let decoded = try? decoder.decode([NotificationHistoryEntry].self, from: data) else {
+            return
+        }
+        let cutoff = now.addingTimeInterval(-Self.historyRetention)
+        let fresh = decoded
+            .filter { $0.receivedAt >= cutoff }
+            .prefix(Self.historyLimit)
+        history = Array(fresh)
+        if history.count != decoded.count {
+            saveHistory()
+        }
+    }
+
+    private func saveHistory() {
+        guard let url = historyStorageURL else { return }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(history) else { return }
+        let directory = url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
     }
 
     private func enqueue(_ notification: SystemNotification) {

@@ -13,6 +13,7 @@ struct BoringHeader: View {
     @ObservedObject var coordinator = BoringViewCoordinator.shared
     @StateObject var shelfState = ShelfStateViewModel.shared
     @ObservedObject var devActivity = DevActivityStore.shared
+    @ObservedObject var notificationManager = SystemNotificationManager.shared
     @Default(.boringShelf) private var boringShelf
     @Default(.enableSystemTab) private var enableSystemTab
     var body: some View {
@@ -51,6 +52,7 @@ struct BoringHeader: View {
                         )
                             .transition(.scale(scale: 0.8).combined(with: .opacity))
                     } else {
+                        notificationHistoryButton
                         if Defaults[.settingsIconInNotch] {
                             Button(action: {
                                 DispatchQueue.main.async {
@@ -80,6 +82,40 @@ struct BoringHeader: View {
         }
         .foregroundColor(.gray)
         .environmentObject(vm)
+    }
+
+    private var notificationHistoryButton: some View {
+        let isSelected = coordinator.currentView == .notifications
+        let unread = notificationManager.unreadCount
+
+        return Button {
+            withAnimation(.smooth) {
+                coordinator.currentView = isSelected ? .home : .notifications
+            }
+        } label: {
+            Capsule()
+                .fill(isSelected ? Color(nsColor: .secondarySystemFill) : .black)
+                .frame(width: 30, height: 30)
+                .overlay {
+                    Image(systemName: isSelected ? "bell.fill" : "bell")
+                        .foregroundStyle(isSelected || unread > 0 ? .white : .white.opacity(0.8))
+                        .imageScale(.medium)
+                }
+                .overlay(alignment: .topTrailing) {
+                    if unread > 0 && !isSelected {
+                        Text(unread > 9 ? "9+" : "\(unread)")
+                            .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, unread > 9 ? 3.5 : 0)
+                            .frame(minWidth: 14, minHeight: 14)
+                            .background(Color.effectiveAccent, in: Capsule())
+                            .offset(x: 2, y: -2)
+                    }
+                }
+        }
+        .buttonStyle(PlainButtonStyle())
+        .accessibilityLabel("Notification History")
+        .help("Notification History")
     }
 
     func isOSDType(_ type: SneakContentType) -> Bool {

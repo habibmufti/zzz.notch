@@ -20,7 +20,7 @@ import Darwin
 import Defaults
 import SwiftUI
 
-enum DevEventStatus: String {
+enum DevEventStatus: String, Codable {
     case info, ok, fail, wait, run, idle
 
     var color: Color {

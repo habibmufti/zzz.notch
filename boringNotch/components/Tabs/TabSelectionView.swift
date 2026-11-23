@@ -36,6 +36,7 @@ struct TabSelectionView: View {
             case .shelf: boringShelf
             case .dev: !devActivity.items.isEmpty
             case .system: enableSystemTab
+            case .notifications: false
             }
         }
     }

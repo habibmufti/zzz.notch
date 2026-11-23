@@ -17,6 +17,7 @@ struct NotificationSettingsView: View {
     @Default(.notificationLiveActivity) private var notificationLiveActivity
     @Default(.notificationsFromAllApps) private var notificationsFromAllApps
     @Default(.notificationAllowedApps) private var allowedApps
+    @ObservedObject private var notificationManager = SystemNotificationManager.shared
     @State private var isAccessibilityAuthorized = true
 
     private var selectedApps: [NotificationApp] {
@@ -106,6 +107,27 @@ struct NotificationSettingsView: View {
                 }
             }
             .disabled(!notificationLiveActivity)
+
+            Section {
+                HStack {
+                    Text("Saved notifications")
+                    Spacer()
+                    Text("\(notificationManager.history.count)")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+
+                Button("Clear History", role: .destructive) {
+                    notificationManager.clearHistory()
+                }
+                .disabled(notificationManager.history.isEmpty)
+            } header: {
+                Text("History")
+            } footer: {
+                Text("Keeps up to \(SystemNotificationManager.historyLimit) recent notifications captured while zzz.notch is running for 24 hours.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .navigationTitle("Notifications")

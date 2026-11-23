@@ -144,4 +144,163 @@ final class PlaybackStateTests: XCTestCase {
         }
         XCTAssertGreaterThan(nonBlack, 20, "expanded view rendered ~empty")
     }
+
+    func testPeekContentShownForSystemNotifications() {
+        let whatsapp = SystemNotification(
+            id: "wa-1", appName: "WhatsApp", bundleID: "net.whatsapp.WhatsApp",
+            title: "Budi", subtitle: nil, body: "Lagi dimana?",
+            receivedAt: Date())
+        XCTAssertEqual(
+            NotificationLiveActivity.peekContent(for: whatsapp),
+            .init(title: "Budi", source: "WhatsApp", body: "Lagi dimana?")
+        )
+
+        let mail = SystemNotification(
+            id: "mail-1", appName: "Mail", bundleID: "com.apple.mail",
+            title: "Alice", subtitle: "Standup", body: "Starts in 5 min",
+            receivedAt: Date())
+        XCTAssertEqual(
+            NotificationLiveActivity.peekContent(for: mail),
+            .init(title: "Alice", source: "Mail", body: "Standup · Starts in 5 min")
+        )
+
+        let noTitle = SystemNotification(
+            id: "cal-1", appName: "Calendar", bundleID: "com.apple.iCal",
+            title: nil, subtitle: nil, body: "Meeting now",
+            receivedAt: Date())
+        XCTAssertEqual(
+            NotificationLiveActivity.peekContent(for: noTitle),
+            .init(title: "Calendar", source: nil, body: "Meeting now")
+        )
+
+        let matchingTitle = SystemNotification(
+            id: "discord-1", appName: "Discord", bundleID: "com.hnc.Discord",
+            title: "Discord", subtitle: "General", body: nil,
+            receivedAt: Date())
+        XCTAssertEqual(
+            NotificationLiveActivity.peekContent(for: matchingTitle),
+            .init(title: "Discord", source: nil, body: "General")
+        )
+
+        let devDone = SystemNotification(
+            id: "dev-1", appName: "agy", bundleID: nil,
+            title: "● zzz.notch", subtitle: "bash: xcodebuild", body: "Done",
+            receivedAt: Date(), status: .ok)
+        XCTAssertEqual(
+            NotificationLiveActivity.peekContent(for: devDone),
+            .init(title: "zzz.notch", source: "agy", body: "Done")
+        )
+
+        let empty = SystemNotification(
+            id: "empty-1", appName: nil, bundleID: nil,
+            title: nil, subtitle: nil, body: nil,
+            receivedAt: Date())
+        XCTAssertNil(NotificationLiveActivity.peekContent(for: empty))
+    }
+
+    func testSystemNotificationLiveActivityExpandsBelowPill() {
+        let vm = BoringViewModel()
+        vm.hideOnClosed = false
+        vm.closedNotchSize = CGSize(width: 185, height: 32)
+
+        let notification = SystemNotification(
+            id: "wa-peek", appName: "WhatsApp", bundleID: "net.whatsapp.WhatsApp",
+            title: "Sender", subtitle: nil, body: "Hello from WhatsApp",
+            receivedAt: Date())
+
+        let view = NotificationLiveActivity(notification: notification)
+            .environmentObject(vm)
+        let hostingView = NSHostingView(rootView: view)
+        let fittingSize = hostingView.fittingSize
+
+        XCTAssertGreaterThan(
+            fittingSize.height,
+            vm.effectiveClosedNotchHeight + 10,
+            "system notification should grow downward with peek content like dev notifications"
+        )
+    }
+
+    func testNotificationHistoryLifecycleAndPersistence() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("zzznotch-history-tests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let fileURL = tempDir.appendingPathComponent("notification-history.json")
+
+        let manager = SystemNotificationManager(storageURL: fileURL, observeSystemNotifications: false)
+        let now = Date()
+
+        // 1. Capture dev result & regular notification; ignore ongoing run/idle.
+        let running = SystemNotification(
+            id: "dev-run", appName: "agy", bundleID: nil,
+            title: "zzz.notch", subtitle: nil, body: "Working",
+            receivedAt: now, status: .run)
+        manager.post(running)
+        XCTAssertTrue(manager.history.isEmpty, "ongoing run events should not spam history")
+
+        let done = SystemNotification(
+            id: "dev-done", appName: "agy", bundleID: nil,
+            title: "zzz.notch", subtitle: nil, body: "Finished build",
+            receivedAt: now, status: .ok)
+        manager.post(done)
+        XCTAssertEqual(manager.history.count, 1)
+        XCTAssertEqual(manager.unreadCount, 1)
+
+        // Timeout dismiss keeps item in history.
+        manager.dismissActive(token: "dev-done")
+        XCTAssertNil(manager.activeNotification)
+        XCTAssertEqual(manager.history.count, 1)
+
+        // 2. Dedupe moves updated item to top and marks unread.
+        manager.markAllHistoryRead()
+        XCTAssertEqual(manager.unreadCount, 0)
+
+        let wa = SystemNotification(
+            id: "wa-1", appName: "WhatsApp", bundleID: "net.whatsapp.WhatsApp",
+            title: "Budi", subtitle: nil, body: "Halo",
+            receivedAt: now.addingTimeInterval(5))
+        manager.recordInHistory(wa, now: now.addingTimeInterval(5))
+        XCTAssertEqual(manager.history.map(\.id), ["wa-1", "dev-done"])
+        XCTAssertEqual(manager.unreadCount, 1)
+
+        let doneUpdated = SystemNotification(
+            id: "dev-done", appName: "agy", bundleID: nil,
+            title: "zzz.notch", subtitle: nil, body: "Finished tests",
+            receivedAt: now.addingTimeInterval(10), status: .ok)
+        manager.recordInHistory(doneUpdated, now: now.addingTimeInterval(10))
+        XCTAssertEqual(manager.history.map(\.id), ["dev-done", "wa-1"])
+        XCTAssertEqual(manager.history.first?.body, "Finished tests")
+        XCTAssertEqual(manager.unreadCount, 2)
+
+        // 3. Explicit dismiss with removeFromHistory removes it from history.
+        manager.post(wa)
+        manager.dismissActive(token: "wa-1", dismissNative: false, removeFromHistory: true)
+        XCTAssertEqual(manager.history.map(\.id), ["dev-done"])
+
+        // 4. Reload from disk preserves surviving items and prunes expired (>24h).
+        let stale = SystemNotification(
+            id: "stale-1", appName: "Mail", bundleID: "com.apple.mail",
+            title: "Old", subtitle: nil, body: "Yesterday",
+            receivedAt: now.addingTimeInterval(-(SystemNotificationManager.historyRetention + 60)))
+        manager.recordInHistory(stale, now: now.addingTimeInterval(-(SystemNotificationManager.historyRetention + 60)))
+        let reloaded = SystemNotificationManager(storageURL: fileURL, observeSystemNotifications: false)
+        XCTAssertEqual(reloaded.history.map(\.id), ["dev-done"])
+
+        // 5. Enforces 50-item capacity cap (newest kept).
+        for i in 0..<60 {
+            let note = SystemNotification(
+                id: "cap-\(i)", appName: "App", bundleID: nil,
+                title: "Title \(i)", subtitle: nil, body: "Body \(i)",
+                receivedAt: now.addingTimeInterval(Double(i)))
+            reloaded.recordInHistory(note, now: now.addingTimeInterval(Double(i)))
+        }
+        XCTAssertEqual(reloaded.history.count, SystemNotificationManager.historyLimit)
+        XCTAssertEqual(reloaded.history.first?.id, "cap-59")
+        XCTAssertEqual(reloaded.history.last?.id, "cap-10")
+
+        // 6. Clear removes everything and persists empty state.
+        reloaded.clearHistory()
+        XCTAssertTrue(reloaded.history.isEmpty)
+        let afterClear = SystemNotificationManager(storageURL: fileURL, observeSystemNotifications: false)
+        XCTAssertTrue(afterClear.history.isEmpty)
+    }
 }

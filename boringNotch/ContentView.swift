@@ -204,9 +204,10 @@ struct ContentView: View {
     private var openNotchHeight: CGFloat? {
         if notificationManager.activeNotification != nil { return 132 }
         if Defaults[.compactMode] { return nil }
-        // The Dev tab sizes to its content up to `devTabNotchHeight` so a
-        // short card doesn't leave an empty black box below it.
+        // The Dev and Notifications tabs size to their content up to
+        // `devTabNotchHeight` so a short list doesn't leave an empty black box below it.
         if coordinator.currentView == .dev && !devActivity.items.isEmpty { return nil }
+        if coordinator.currentView == .notifications { return nil }
         return vm.notchSize.height
     }
 
@@ -651,6 +652,8 @@ struct ContentView: View {
                             DevActivityListView()
                         case .system:
                             SystemUsageView()
+                        case .notifications:
+                            NotificationHistoryView()
                         }
                     }
                 }
@@ -994,7 +997,7 @@ extension ContentView {
     }
 
     private func handleUpGesture(translation: CGFloat, phase: NSEvent.Phase) {
-        guard vm.notchState == .open && !vm.isHoveringCalendar && coordinator.currentView != .dev else { return }
+        guard vm.notchState == .open && !vm.isHoveringCalendar && coordinator.currentView != .dev && coordinator.currentView != .notifications else { return }
 
         withAnimation(animationSpring) {
             gestureProgress = (translation / Defaults[.gestureSensitivity]) * -20
