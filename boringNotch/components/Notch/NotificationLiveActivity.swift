@@ -407,22 +407,15 @@ private struct NotificationHistoryRow: View {
     private var notification: SystemNotification { entry.asNotification }
 
     private var primaryTitle: String {
-        entry.title.map(DevText.cleanTitle) ?? entry.appName ?? "Notification"
+        entry.displayTitle
     }
 
     private var sourceLabel: String? {
-        guard let appName = entry.appName, appName != primaryTitle else { return nil }
-        return appName
+        entry.displaySource
     }
 
     private var messageText: String? {
-        if entry.status != nil {
-            return entry.body
-        }
-        if let subtitle = entry.subtitle, let body = entry.body {
-            return "\(subtitle) · \(body)"
-        }
-        return entry.body ?? entry.subtitle
+        entry.displayMessage
     }
 
     private var accentColor: Color {
@@ -496,6 +489,196 @@ private struct NotificationHistoryRow: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(.white.opacity(hovering ? 0.10 : 0.06), in: RoundedRectangle(cornerRadius: 10))
+        .onHover { hovering = $0 }
+    }
+}
+
+private extension NotificationHistoryEntry {
+    var displayTitle: String {
+        title.map(DevText.cleanTitle) ?? appName ?? "Notification"
+    }
+
+    var displaySource: String? {
+        guard let appName, appName != displayTitle else { return nil }
+        return appName
+    }
+
+    var displayMessage: String? {
+        if status != nil {
+            return body
+        }
+        if let subtitle, let body {
+            return "\(subtitle) · \(body)"
+        }
+        return body ?? subtitle
+    }
+}
+
+/// Compact strip of the top 3 recent notifications shown under Music on Home.
+struct HomeRecentNotificationsView: View {
+    static let maxVisible = 3
+
+    @EnvironmentObject private var vm: BoringViewModel
+    @ObservedObject private var coordinator = BoringViewCoordinator.shared
+    @ObservedObject private var manager = SystemNotificationManager.shared
+
+    static func visibleEntries(from history: [NotificationHistoryEntry]) -> [NotificationHistoryEntry] {
+        Array(history.prefix(maxVisible))
+    }
+
+    var body: some View {
+        let entries = Self.visibleEntries(from: manager.history)
+        if !entries.isEmpty {
+            VStack(alignment: .leading, spacing: 5) {
+                Rectangle()
+                    .fill(.white.opacity(0.08))
+                    .frame(height: 0.5)
+                    .padding(.horizontal, 4)
+
+                HStack(spacing: 6) {
+                    Text("NOTIFICATIONS · \(manager.history.count)")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .tracking(0.6)
+                        .foregroundStyle(.tertiary)
+
+                    Spacer()
+
+                    if manager.history.count > Self.maxVisible {
+                        Button {
+                            withAnimation(.smooth) {
+                                coordinator.currentView = .notifications
+                            }
+                        } label: {
+                            Text("View all")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.white.opacity(0.08), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                            manager.clearHistory()
+                        }
+                    } label: {
+                        Text("Clear")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.white.opacity(0.06), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 4)
+
+                VStack(spacing: 4) {
+                    ForEach(entries) { entry in
+                        HomeNotificationCompactRow(
+                            entry: entry,
+                            onOpen: {
+                                Task {
+                                    let opened = await manager.openHistoryEntry(entry)
+                                    if opened {
+                                        vm.close()
+                                    }
+                                }
+                            },
+                            onRemove: {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                    manager.removeFromHistory(id: entry.id)
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        }
+    }
+}
+
+private struct HomeNotificationCompactRow: View {
+    let entry: NotificationHistoryEntry
+    let onOpen: () -> Void
+    let onRemove: () -> Void
+
+    @State private var hovering = false
+
+    private var accentColor: Color {
+        entry.status?.color ?? Color.effectiveAccent
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            NotificationSourceIcon(
+                notification: entry.asNotification,
+                size: entry.status != nil ? 20 : 18
+            )
+            .frame(width: 20, height: 20)
+
+            Button(action: onOpen) {
+                HStack(spacing: 6) {
+                    if !entry.isRead {
+                        Circle()
+                            .fill(accentColor)
+                            .frame(width: 4.5, height: 4.5)
+                    }
+                    Text(entry.displayTitle)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                    if let source = entry.displaySource {
+                        Text(source)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    if let status = entry.status {
+                        Text(status.label)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(status.color)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(status.color.opacity(0.14), in: Capsule())
+                            .fixedSize()
+                    }
+                    if let message = entry.displayMessage {
+                        Text(message)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Spacer(minLength: 4)
+                    Text(entry.receivedAt, style: .relative)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16, height: 16)
+                    .background(.white.opacity(hovering ? 0.14 : 0.08), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Remove from history")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(hovering ? 0.11 : 0.06), in: RoundedRectangle(cornerRadius: 8))
         .onHover { hovering = $0 }
     }
 }

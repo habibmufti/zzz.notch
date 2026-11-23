@@ -204,10 +204,12 @@ struct ContentView: View {
     private var openNotchHeight: CGFloat? {
         if notificationManager.activeNotification != nil { return 132 }
         if Defaults[.compactMode] { return nil }
-        // The Dev and Notifications tabs size to their content up to
-        // `devTabNotchHeight` so a short list doesn't leave an empty black box below it.
+        // The Dev, Notifications, and Home (when showing recent notifications)
+        // tabs size to their content so short lists don't leave empty black space
+        // and Home can grow cleanly below Music.
         if coordinator.currentView == .dev && !devActivity.items.isEmpty { return nil }
         if coordinator.currentView == .notifications { return nil }
+        if coordinator.currentView == .home && !notificationManager.history.isEmpty { return nil }
         return vm.notchSize.height
     }
 

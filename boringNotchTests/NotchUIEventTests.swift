@@ -314,4 +314,20 @@ final class PlaybackStateTests: XCTestCase {
         let afterClear = SystemNotificationManager(storageURL: fileURL, observeSystemNotifications: false)
         XCTAssertTrue(afterClear.history.isEmpty)
     }
+
+    func testHomeRecentNotificationsShowsTopThree() {
+        let now = Date()
+        let entries = (0..<5).map { idx in
+            NotificationHistoryEntry(
+                from: SystemNotification(
+                    id: "home-\(idx)", appName: "App", bundleID: nil,
+                    title: "Title \(idx)", subtitle: nil, body: "Body \(idx)",
+                    receivedAt: now.addingTimeInterval(Double(-idx))
+                )
+            )
+        }
+        let visible = HomeRecentNotificationsView.visibleEntries(from: entries)
+        XCTAssertEqual(visible.map(\.id), ["home-0", "home-1", "home-2"])
+        XCTAssertTrue(HomeRecentNotificationsView.visibleEntries(from: []).isEmpty)
+    }
 }

@@ -546,13 +546,26 @@ struct VolumeControlView: View {
 struct NotchHomeView: View {
     @EnvironmentObject var vm: BoringViewModel
     @ObservedObject var coordinator = BoringViewCoordinator.shared
+    @ObservedObject var notificationManager = SystemNotificationManager.shared
     let albumArtNamespace: Namespace.ID
     let horizontalMediaGestureFeedback: CGFloat
     @Binding var isHoveringMusicArea: Bool
 
     var body: some View {
-        mainContent
-            .transition(.opacity)
+        VStack(spacing: 8) {
+            if notificationManager.history.isEmpty {
+                mainContent
+            } else {
+                mainContent
+                    .frame(height: 132)
+                HomeRecentNotificationsView()
+            }
+        }
+        .transition(.opacity)
+        .blur(radius: vm.notchState == .closed ? 30 : 0)
+        .onAppear {
+            notificationManager.pruneExpiredHistory()
+        }
     }
 
     private var mainContent: some View {
@@ -574,7 +587,6 @@ struct NotchHomeView: View {
             }
         }
         .transition(.opacity)
-        .blur(radius: vm.notchState == .closed ? 30 : 0)
     }
 }
 
