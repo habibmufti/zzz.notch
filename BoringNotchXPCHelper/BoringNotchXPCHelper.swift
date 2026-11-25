@@ -123,6 +123,16 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
     // MARK: - Notification Center banners
 
     private static let watcher = NotificationWatcher()
+    private static var activeNotificationConnectionID: ObjectIdentifier?
+
+    static func handleConnectionInvalidated(id: ObjectIdentifier) {
+        DispatchQueue.main.async {
+            guard activeNotificationConnectionID == id else { return }
+            activeNotificationConnectionID = nil
+            watcher.onBanner = nil
+            watcher.stop()
+        }
+    }
 
     @objc func startNotificationWatching(with reply: @escaping (Bool) -> Void) {
         // Capture the delegate for this connection before hopping queues —
@@ -133,6 +143,7 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         // connection was configured with, so casting to the parent can
         // return nil and silently swallow every callback.
         let connection = NSXPCConnection.current()
+        let connectionID = connection.map(ObjectIdentifier.init)
         let proxy = connection?.remoteObjectProxyWithErrorHandler { error in
             NSLog("[boringNotch] notification callback failed: \(error.localizedDescription)")
         }
@@ -144,6 +155,7 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
 
         DispatchQueue.main.async {
             let watcher = Self.watcher
+            Self.activeNotificationConnectionID = connectionID
             watcher.onBanner = { notification in
                 delegate?.notificationDidAppear([
                     "token": notification.token,
@@ -155,13 +167,21 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
                 ])
             }
             let started = watcher.start()
+            if !started {
+                Self.activeNotificationConnectionID = nil
+                watcher.onBanner = nil
+            }
             NSLog("[boringNotch] notification watcher start -> \(started), AX trusted: \(AXIsProcessTrusted())")
             reply(started)
         }
     }
 
     @objc func stopNotificationWatching() {
-        DispatchQueue.main.async { Self.watcher.stop() }
+        DispatchQueue.main.async {
+            Self.activeNotificationConnectionID = nil
+            Self.watcher.onBanner = nil
+            Self.watcher.stop()
+        }
     }
 
     @objc func setNotificationFilter(_ bundleIDs: [String], allApps: Bool) {

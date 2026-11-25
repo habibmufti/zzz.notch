@@ -73,21 +73,15 @@ final class XPCHelperClient: NSObject, ObservableObject {
             Task { @MainActor in
                 // Ignore stale handlers: an interruption from a deallocated
                 // connection must not nil a freshly-built one.
-                guard let self, let conn, self.connection === conn else { return }
-                self.connection = nil
-                self.remoteService = nil
-                self.helperAvailable = false
-                self.lastError = .unavailable
+                guard let self, let conn else { return }
+                self.handleConnectionLost(for: conn)
             }
         }
 
         conn.invalidationHandler = { [weak self, weak conn] in
             Task { @MainActor in
-                guard let self, let conn, self.connection === conn else { return }
-                self.connection = nil
-                self.remoteService = nil
-                self.helperAvailable = false
-                self.lastError = .unavailable
+                guard let self, let conn else { return }
+                self.handleConnectionLost(for: conn)
             }
         }
 
@@ -103,6 +97,15 @@ final class XPCHelperClient: NSObject, ObservableObject {
         helperAvailable = true
         lastError = nil
         return service
+    }
+
+    private func handleConnectionLost(for conn: NSXPCConnection) {
+        guard connection === conn else { return }
+        connection = nil
+        remoteService = nil
+        helperAvailable = false
+        lastError = .unavailable
+        NotificationCenter.default.post(name: .xpcHelperConnectionDidInterrupt, object: nil)
     }
 
     private func makeAppDelegateInterface() -> NSXPCInterface {
@@ -428,16 +431,20 @@ extension XPCHelperClient {
         }
     }
 
+    nonisolated func syncNotificationFilter(bundleIDs: Set<String>, allApps: Bool) async {
+        let service = await MainActor.run { ensureRemoteService() }
+        do {
+            try await service.withService {
+                $0.setNotificationFilter(Array(bundleIDs), allApps: allApps)
+            }
+        } catch {
+            await MainActor.run { self.lastError = .transport(underlying: error) }
+        }
+    }
+
     nonisolated func setNotificationFilter(bundleIDs: Set<String>, allApps: Bool) {
         Task {
-            let service = await MainActor.run { ensureRemoteService() }
-            do {
-                try await service.withService {
-                    $0.setNotificationFilter(Array(bundleIDs), allApps: allApps)
-                }
-            } catch {
-                await MainActor.run { self.lastError = .transport(underlying: error) }
-            }
+            await syncNotificationFilter(bundleIDs: bundleIDs, allApps: allApps)
         }
     }
 
@@ -480,4 +487,5 @@ extension XPCHelperClient {
 
 extension Notification.Name {
     static let systemNotificationDidAppear = Notification.Name("systemNotificationDidAppear")
+    static let xpcHelperConnectionDidInterrupt = Notification.Name("xpcHelperConnectionDidInterrupt")
 }

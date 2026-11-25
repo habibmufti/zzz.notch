@@ -106,7 +106,28 @@ final class SystemNotificationManager: ObservableObject {
     private let historyStorageURL: URL?
     private var dismissTask: Task<Void, Never>?
     private var notificationObserver: NSObjectProtocol?
+    private var xpcInterruptObserver: NSObjectProtocol?
+    private var workspaceWakeObserver: NSObjectProtocol?
+    private var screensWakeObserver: NSObjectProtocol?
     private var isUserPresent = false
+
+    private lazy var watchSupervisor = NotificationWatchSupervisor(
+        isAuthorized: {
+            await XPCHelperClient.shared.isAccessibilityAuthorized()
+        },
+        syncFilter: {
+            await XPCHelperClient.shared.syncNotificationFilter(
+                bundleIDs: Defaults[.notificationAllowedApps],
+                allApps: Defaults[.notificationsFromAllApps]
+            )
+        },
+        startWatching: {
+            await XPCHelperClient.shared.startNotificationWatching()
+        },
+        stopWatching: {
+            XPCHelperClient.shared.stopNotificationWatching()
+        }
+    )
 
     static var defaultHistoryStorageURL: URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
@@ -125,6 +146,22 @@ final class SystemNotificationManager: ObservableObject {
                 guard let payload = note.userInfo as? [String: String] else { return }
                 Task { @MainActor in self?.add(payload) }
             }
+            xpcInterruptObserver = NotificationCenter.default.addObserver(
+                forName: .xpcHelperConnectionDidInterrupt, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.watchSupervisor.handleHelperDisconnected() }
+            }
+            let workspaceCenter = NSWorkspace.shared.notificationCenter
+            workspaceWakeObserver = workspaceCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.watchSupervisor.handleSystemWake() }
+            }
+            screensWakeObserver = workspaceCenter.addObserver(
+                forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.watchSupervisor.handleSystemWake() }
+            }
         }
     }
 
@@ -132,16 +169,24 @@ final class SystemNotificationManager: ObservableObject {
         if let notificationObserver {
             NotificationCenter.default.removeObserver(notificationObserver)
         }
+        if let xpcInterruptObserver {
+            NotificationCenter.default.removeObserver(xpcInterruptObserver)
+        }
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        if let workspaceWakeObserver {
+            workspaceCenter.removeObserver(workspaceWakeObserver)
+        }
+        if let screensWakeObserver {
+            workspaceCenter.removeObserver(screensWakeObserver)
+        }
     }
 
     func start() async {
-        guard await XPCHelperClient.shared.isAccessibilityAuthorized() else { return }
-        updateFilter()
-        _ = await XPCHelperClient.shared.startNotificationWatching()
+        await watchSupervisor.start()
     }
 
     func stop() {
-        XPCHelperClient.shared.stopNotificationWatching()
+        watchSupervisor.stop()
         queuedNotifications.removeAll()
         isUserPresent = false
         dismissActive()

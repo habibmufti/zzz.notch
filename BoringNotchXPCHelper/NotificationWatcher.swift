@@ -75,10 +75,15 @@ final class NotificationWatcher {
 
     var onBanner: ((CapturedNotification) -> Void)?
 
+    private let transactionGuard: XPCTransactionGuard
     private var appElement: AXUIElement?
+    private var observedPID: pid_t?
     private var axObserver: AXObserver?
     private var observerRunLoop: AXObserverRunLoop?
     private var observerContext: ObserverContext?
+    private var processExitSource: DispatchSourceProcess?
+    private var reattachWorkItem: DispatchWorkItem?
+    private var shouldKeepWatching = false
     private var scanScheduled = false
     private var settleWorkItem: DispatchWorkItem?
     private var observedWindows: [CFHashCode: AXUIElement] = [:]
@@ -90,6 +95,13 @@ final class NotificationWatcher {
     private var parkedWindows: [Int: (window: AXUIElement, origin: CGPoint)] = [:]
     private var bundleIDCache: [String: String] = [:]
 
+    private static let reattachDelays: [TimeInterval] = [0.5, 1.0, 2.0, 5.0, 10.0]
+    private static let maxBundleIDCacheEntries = 128
+
+    init(transactionGuard: XPCTransactionGuard = XPCTransactionGuard()) {
+        self.transactionGuard = transactionGuard
+    }
+
     var isRunning: Bool { appElement != nil }
 
     func configureFilter(bundleIDs: Set<String>, allApps: Bool) {
@@ -99,27 +111,64 @@ final class NotificationWatcher {
 
     @discardableResult
     func start() -> Bool {
-        guard AXIsProcessTrusted(), !isRunning,
-              let application = NSRunningApplication.runningApplications(
-                withBundleIdentifier: notificationCenterBundleID
-              ).first else {
+        reattachWorkItem?.cancel()
+        reattachWorkItem = nil
+
+        guard AXIsProcessTrusted() else {
+            stop()
             return false
         }
 
-        appElement = AXUIElementCreateApplication(application.processIdentifier)
-        guard installObserver(for: application.processIdentifier) else {
+        let application = NSRunningApplication.runningApplications(
+            withBundleIdentifier: notificationCenterBundleID
+        ).first
+
+        if isRunning {
+            if let application,
+               observedPID == application.processIdentifier,
+               observerRunLoop?.isRunning == true {
+                shouldKeepWatching = true
+                transactionGuard.acquire()
+                scan()
+                return true
+            }
+            teardownObserver()
+        }
+
+        guard let application else {
+            return false
+        }
+
+        let pid = application.processIdentifier
+        appElement = AXUIElementCreateApplication(pid)
+        guard installObserver(for: pid) else {
             appElement = nil
             return false
         }
 
-        refreshObservedWindows()
+        observedPID = pid
+        shouldKeepWatching = true
+        transactionGuard.acquire()
+        installProcessExitMonitor(for: pid)
         scan()
         return true
     }
 
     func stop() {
+        shouldKeepWatching = false
+        reattachWorkItem?.cancel()
+        reattachWorkItem = nil
+        teardownObserver()
+        bundleIDCache.removeAll()
+        transactionGuard.release()
+    }
+
+    private func teardownObserver() {
+        processExitSource?.cancel()
+        processExitSource = nil
         settleWorkItem?.cancel()
         settleWorkItem = nil
+        observerContext?.watcher = nil
         if let observer = axObserver {
             if let appElement {
                 removeObserverNotifications(from: appElement, observer: observer)
@@ -133,11 +182,53 @@ final class NotificationWatcher {
         axObserver = nil
         observerRunLoop = nil
         observerContext = nil
+        observedPID = nil
         scanScheduled = false
         liveTokens.removeAll()
         liveBanners.removeAll()
         restoreAllWindows()
         appElement = nil
+    }
+
+    private func installProcessExitMonitor(for pid: pid_t) {
+        processExitSource?.cancel()
+        let source = DispatchSource.makeProcessSource(
+            identifier: pid,
+            eventMask: .exit,
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            guard let self, self.observedPID == pid else { return }
+            NSLog("[boringNotch] NotificationCenter (pid \(pid)) exited; scheduling reattach")
+            self.teardownObserver()
+            if self.shouldKeepWatching {
+                self.scheduleReattach(attempt: 0)
+            }
+        }
+        source.resume()
+        processExitSource = source
+    }
+
+    private func scheduleReattach(attempt: Int) {
+        reattachWorkItem?.cancel()
+        guard shouldKeepWatching else { return }
+        guard attempt < Self.reattachDelays.count else {
+            NSLog("[boringNotch] NotificationCenter did not respawn after reattach retries")
+            shouldKeepWatching = false
+            transactionGuard.release()
+            return
+        }
+
+        let delay = Self.reattachDelays[attempt]
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.shouldKeepWatching else { return }
+            self.reattachWorkItem = nil
+            if !self.start() {
+                self.scheduleReattach(attempt: attempt + 1)
+            }
+        }
+        reattachWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     /// Triggers the native macOS Notification Center click action on a live
@@ -184,9 +275,7 @@ final class NotificationWatcher {
         }
     }
 
-    private func refreshObservedWindows() {
-        guard let appElement else { return }
-        let windows = (appElement[kAXWindowsAttribute] as? [AXUIElement]) ?? []
+    private func refreshObservedWindows(using windows: [AXUIElement]) {
         var current = Set<CFHashCode>()
         for window in windows {
             let subrole = window.string(kAXSubroleAttribute)
@@ -216,21 +305,24 @@ final class NotificationWatcher {
     private func installObserver(for processIdentifier: pid_t) -> Bool {
         var observer: AXObserver?
         let result = AXObserverCreate(processIdentifier, { _, element, notification, refcon in
-            guard let refcon else { return }
-            let context = Unmanaged<ObserverContext>.fromOpaque(refcon).takeUnretainedValue()
-            let name = notification as String
-            let subrole = name == "AXUIElementDestroyed"
-                ? nil
-                : element.string(kAXSubroleAttribute)
-            let identifier = name == "AXUIElementDestroyed"
-                ? nil
-                : element.string(kAXIdentifierAttribute)
-            DispatchQueue.main.async { [weak context] in
-                context?.watcher?.handleObserverEvent(
+            autoreleasepool {
+                guard let refcon else { return }
+                let context = Unmanaged<ObserverContext>.fromOpaque(refcon).takeUnretainedValue()
+                let name = notification as String
+                let subrole = name == "AXUIElementDestroyed"
+                    ? nil
+                    : element.string(kAXSubroleAttribute)
+                let identifier = name == "AXUIElementDestroyed"
+                    ? nil
+                    : element.string(kAXIdentifierAttribute)
+                guard NotificationObservationPolicy.shouldScan(
                     notification: name,
                     subrole: subrole,
                     identifier: identifier
-                )
+                ) else { return }
+                DispatchQueue.main.async { [weak context] in
+                    context?.watcher?.handleObserverEvent()
+                }
             }
         }, &observer)
         guard result == .success, let observer, let appElement else { return false }
@@ -245,8 +337,10 @@ final class NotificationWatcher {
             return false
         }
 
-        let runLoop = AXObserverRunLoop(observer: observer)
+        let runLoop = AXObserverRunLoop(observer: observer, retainedContext: context)
         guard runLoop.start() else {
+            runLoop.stop()
+            removeObserverNotifications(from: appElement, observer: observer)
             axObserver = nil
             observerContext = nil
             return false
@@ -255,17 +349,7 @@ final class NotificationWatcher {
         return true
     }
 
-    private func handleObserverEvent(
-        notification: String,
-        subrole: String?,
-        identifier: String?
-    ) {
-        guard NotificationObservationPolicy.shouldScan(
-            notification: notification,
-            subrole: subrole,
-            identifier: identifier
-        ) else { return }
-
+    private func handleObserverEvent() {
         scheduleScan()
         scheduleSettleScan()
     }
@@ -294,10 +378,11 @@ final class NotificationWatcher {
     private func scan() {
         autoreleasepool {
             guard let appElement else { return }
-            refreshObservedWindows()
+            let windows = (appElement[kAXWindowsAttribute] as? [AXUIElement]) ?? []
+            refreshObservedWindows(using: windows)
             var seen = Set<String>()
 
-            for window in (appElement[kAXWindowsAttribute] as? [AXUIElement]) ?? [] {
+            for window in windows {
                 guard case .banners(let banners) = inspect(window) else { continue }
 
                 for banner in banners {
@@ -575,6 +660,9 @@ final class NotificationWatcher {
             appName: name,
             target: target
         ) {
+            if bundleIDCache.count >= Self.maxBundleIDCacheEntries {
+                bundleIDCache.removeAll(keepingCapacity: true)
+            }
             bundleIDCache[target] = resolved
             return resolved
         }
@@ -701,42 +789,62 @@ final class NotificationWatcher {
 
 private final class AXObserverRunLoop {
     private let observer: AXObserver
+    /// Kept alive until the run loop exits and removes the AXObserver source so
+    /// the unretained `refcon` pointer passed to AXObserverCreate can never
+    /// dangle while an AX callback is in flight.
+    private let retainedContext: AnyObject
     private let ready = DispatchSemaphore(value: 0)
-    private var thread: Thread?
-    private var runLoop: CFRunLoop?
+    private let stateLock = NSLock()
+    private var _isRunning = false
+    private var _runLoop: CFRunLoop?
 
-    init(observer: AXObserver) {
+    var isRunning: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _isRunning
+    }
+
+    init(observer: AXObserver, retainedContext: AnyObject) {
         self.observer = observer
+        self.retainedContext = retainedContext
     }
 
     func start() -> Bool {
-        let thread = Thread { [weak self] in
-            guard let self else { return }
-            let runLoop = CFRunLoopGetCurrent()
-            self.runLoop = runLoop
-            CFRunLoopAddSource(
-                runLoop,
-                AXObserverGetRunLoopSource(self.observer),
-                .defaultMode
-            )
-            self.ready.signal()
-            CFRunLoopRun()
-            CFRunLoopRemoveSource(
-                runLoop,
-                AXObserverGetRunLoopSource(self.observer),
-                .defaultMode
-            )
+        let thread = Thread { [self] in
+            autoreleasepool {
+                let runLoop = CFRunLoopGetCurrent()
+                self.stateLock.lock()
+                self._runLoop = runLoop
+                self._isRunning = true
+                self.stateLock.unlock()
+
+                let source = AXObserverGetRunLoopSource(self.observer)
+                CFRunLoopAddSource(runLoop, source, .defaultMode)
+                self.ready.signal()
+                CFRunLoopRun()
+                CFRunLoopRemoveSource(runLoop, source, .defaultMode)
+
+                self.stateLock.lock()
+                self._isRunning = false
+                self._runLoop = nil
+                self.stateLock.unlock()
+            }
         }
-        self.thread = thread
+        thread.name = "com.habibmufti.zzznotch.ax-observer"
+        thread.qualityOfService = .utility
         thread.start()
         return ready.wait(timeout: .now() + 1) == .success
     }
 
     func stop() {
+        stateLock.lock()
+        let runLoop = _runLoop
+        _isRunning = false
+        _runLoop = nil
+        stateLock.unlock()
+
         guard let runLoop else { return }
         CFRunLoopStop(runLoop)
         CFRunLoopWakeUp(runLoop)
-        thread = nil
-        self.runLoop = nil
     }
 }
