@@ -48,9 +48,7 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
 
         taskToCancel?.cancel()
         if let p = processToTerminate, p.isRunning { p.terminate() }
-        if let ph = pipeHandlerToClose {
-            Task { await ph.close() }
-        }
+        pipeHandlerToClose?.close()
     }
 
     @objc func isAccessibilityAuthorized(with reply: @escaping (Bool) -> Void) {

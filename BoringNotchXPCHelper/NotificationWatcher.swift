@@ -499,8 +499,8 @@ final class NotificationWatcher {
     }
 
     private func inspect(_ root: AXUIElement) -> WindowContents {
-        var pending: [(element: AXUIElement, insideBanner: Bool, insideList: Bool)] = [
-            (root, false, false)
+        var pending: [(element: AXUIElement, insideList: Bool)] = [
+            (root, false)
         ]
         var visited = Set<CFHashCode>()
         var banners: [AXUIElement] = []
@@ -508,7 +508,9 @@ final class NotificationWatcher {
         while let node = pending.popLast() {
             let element = node.element
             guard visited.insert(CFHash(element)).inserted else { continue }
-            guard visited.count <= maxAccessibilityNodes else { return .ignored }
+            guard visited.count <= maxAccessibilityNodes else {
+                return banners.isEmpty ? .ignored : .banners(banners)
+            }
 
             let subrole = element.string(kAXSubroleAttribute)
             let identifier = element.string(kAXIdentifierAttribute)
@@ -519,20 +521,24 @@ final class NotificationWatcher {
                 subrole: subrole,
                 identifier: identifier,
                 stackingIdentifier: stackingIdentifier,
-                insideNotificationList: node.insideList && !node.insideBanner
+                insideNotificationList: node.insideList
             ) || NotificationPanelDetection.isDesktopWidget(identifier: identifier) {
                 return .ignored
             }
 
-            if !node.insideBanner, NotificationPanelDetection.isBanner(subrole: subrole) {
+            if NotificationPanelDetection.isBanner(subrole: subrole) {
                 banners.append(element)
+                // Stop descending once a banner container is matched: internal
+                // text/button subtrees are only needed when capturing a newly
+                // arrived banner, and skipping them here keeps visited node
+                // counts small even when many notifications are on screen.
+                continue
             }
 
-            let childInsideBanner = node.insideBanner || NotificationPanelDetection.isBanner(subrole: subrole)
             let childInsideList = node.insideList
                 || identifier == NotificationPanelDetection.panelListIdentifier
             pending.append(contentsOf: element.children().reversed().map {
-                ($0, childInsideBanner, childInsideList)
+                ($0, childInsideList)
             })
         }
 

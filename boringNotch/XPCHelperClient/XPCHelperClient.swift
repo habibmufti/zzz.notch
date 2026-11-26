@@ -431,19 +431,19 @@ extension XPCHelperClient {
         }
     }
 
-    nonisolated func syncNotificationFilter(bundleIDs: Set<String>, allApps: Bool) async {
-        let service = await MainActor.run { ensureRemoteService() }
+    func syncNotificationFilter(bundleIDs: Set<String>, allApps: Bool) async {
+        let service = ensureRemoteService()
         do {
             try await service.withService {
                 $0.setNotificationFilter(Array(bundleIDs), allApps: allApps)
             }
         } catch {
-            await MainActor.run { self.lastError = .transport(underlying: error) }
+            lastError = .transport(underlying: error)
         }
     }
 
     nonisolated func setNotificationFilter(bundleIDs: Set<String>, allApps: Bool) {
-        Task {
+        Task { @MainActor in
             await syncNotificationFilter(bundleIDs: bundleIDs, allApps: allApps)
         }
     }

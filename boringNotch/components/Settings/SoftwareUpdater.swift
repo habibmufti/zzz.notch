@@ -46,6 +46,8 @@ final class CIUpdater: ObservableObject {
         let databaseId: Int
         let headSha: String
         let displayTitle: String
+        let status: String?
+        let conclusion: String?
     }
 
     func checkForUpdates() {
@@ -129,9 +131,8 @@ final class CIUpdater: ObservableObject {
                 "-R", repo,
                 "--branch", branch,
                 "--workflow", workflow,
-                "--status", "success",
                 "-L", "1",
-                "--json", "databaseId,headSha,displayTitle",
+                "--json", "databaseId,headSha,displayTitle,status,conclusion",
             ]
             let out = Pipe()
             let err = Pipe()
@@ -150,7 +151,22 @@ final class CIUpdater: ObservableObject {
 
             let runs = try JSONDecoder().decode([CIRun].self, from: data)
             guard let latest = runs.first else {
-                throw NSError(domain: "CIUpdater", code: 2, userInfo: [NSLocalizedDescriptionKey: "No successful CI runs found"])
+                throw NSError(domain: "CIUpdater", code: 2, userInfo: [NSLocalizedDescriptionKey: "No CI runs found"])
+            }
+            let shortSHA = String(latest.headSha.prefix(7))
+            if let status = latest.status, status != "completed" {
+                throw NSError(
+                    domain: "CIUpdater",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Latest CI build (\(shortSHA)) is still \(status)…"]
+                )
+            }
+            if let conclusion = latest.conclusion, conclusion != "success" {
+                throw NSError(
+                    domain: "CIUpdater",
+                    code: 4,
+                    userInfo: [NSLocalizedDescriptionKey: "Latest CI build (\(shortSHA)) \(conclusion)"]
+                )
             }
             return latest
         }.value

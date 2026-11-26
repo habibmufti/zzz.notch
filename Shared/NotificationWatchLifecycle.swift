@@ -78,25 +78,25 @@ final class NotificationWatchSupervisor {
     private let wakeCooldown: Duration
     private let retryDelays: [Duration]
     private let maxConsecutiveDisconnectRecoveries: Int
-    private let isAuthorized: @MainActor () async -> Bool
-    private let syncFilter: @MainActor () async -> Void
-    private let startWatching: @MainActor () async -> Bool
-    private let stopWatching: @MainActor () -> Void
+    private let isAuthorized: @MainActor @Sendable () async -> Bool
+    private let syncFilter: @MainActor @Sendable () async -> Void
+    private let startWatching: @MainActor @Sendable () async -> Bool
+    private let stopWatching: @MainActor @Sendable () -> Void
 
     private var recoveryTask: Task<Void, Never>?
     private var consecutiveDisconnectFailures = 0
     private var lastSuccessfulStart: ContinuousClock.Instant?
 
-    init(
+    nonisolated init(
         disconnectDelay: Duration = .milliseconds(250),
         wakeDelay: Duration = .milliseconds(500),
         wakeCooldown: Duration = .seconds(3),
         retryDelays: [Duration] = NotificationWatchSupervisor.defaultRetryDelays,
         maxConsecutiveDisconnectRecoveries: Int = 5,
-        isAuthorized: @escaping @MainActor () async -> Bool,
-        syncFilter: @escaping @MainActor () async -> Void,
-        startWatching: @escaping @MainActor () async -> Bool,
-        stopWatching: @escaping @MainActor () -> Void
+        isAuthorized: @escaping @MainActor @Sendable () async -> Bool,
+        syncFilter: @escaping @MainActor @Sendable () async -> Void,
+        startWatching: @escaping @MainActor @Sendable () async -> Bool,
+        stopWatching: @escaping @MainActor @Sendable () -> Void
     ) {
         self.disconnectDelay = disconnectDelay
         self.wakeDelay = wakeDelay

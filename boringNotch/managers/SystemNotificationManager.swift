@@ -109,6 +109,7 @@ final class SystemNotificationManager: ObservableObject {
     private var xpcInterruptObserver: NSObjectProtocol?
     private var workspaceWakeObserver: NSObjectProtocol?
     private var screensWakeObserver: NSObjectProtocol?
+    private var screenUnlockedObserver: NSObjectProtocol?
     private var isUserPresent = false
 
     private lazy var watchSupervisor = NotificationWatchSupervisor(
@@ -162,6 +163,11 @@ final class SystemNotificationManager: ObservableObject {
             ) { [weak self] _ in
                 Task { @MainActor in self?.watchSupervisor.handleSystemWake() }
             }
+            screenUnlockedObserver = DistributedNotificationCenter.default().addObserver(
+                forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.watchSupervisor.handleSystemWake() }
+            }
         }
     }
 
@@ -178,6 +184,9 @@ final class SystemNotificationManager: ObservableObject {
         }
         if let screensWakeObserver {
             workspaceCenter.removeObserver(screensWakeObserver)
+        }
+        if let screenUnlockedObserver {
+            DistributedNotificationCenter.default().removeObserver(screenUnlockedObserver)
         }
     }
 
@@ -206,7 +215,7 @@ final class SystemNotificationManager: ObservableObject {
         dismissTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
-            await self?.dismissActive(token: notification.id)
+            self?.dismissActive(token: notification.id)
         }
     }
 
@@ -457,7 +466,7 @@ final class SystemNotificationManager: ObservableObject {
         dismissTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
-            await self?.dismissActive(token: token)
+            self?.dismissActive(token: token)
         }
     }
 
